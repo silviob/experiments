@@ -21,20 +21,20 @@ from model import GPTConfig, GPT
 # Shakespeare character-level training configuration
 # I/O
 out_dir = 'out-shakespeare-char'
-eval_interval = 250 # keep frequent because we'll overfit
-log_interval = 10 # don't print too too often
+eval_interval = 2500 # keep frequent because we'll overfit
+log_interval = 100 # don't print too too often
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = False # we expect to overfit, so only save when val improves
 init_from = 'scratch' # 'scratch' or 'resume'
 # wandb logging
 wandb_log = False # disabled by default
-wandb_project = 'shakespeare-char'
-wandb_run_name = 'mini-gpt'
+wandb_project = 'mammals'
+wandb_run_name = 'token embedding replaced'
 # data
 dataset = 'shakespeare_char'
 gradient_accumulation_steps = 1
-batch_size = 64
+batch_size = 256
 block_size = 256 # context of up to 256 previous characters
 # model - baby GPT model :)
 n_layer = 2

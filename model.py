@@ -124,18 +124,17 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wte = nn.Linear(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        # Weight tying between wte and lm_head (both are now linear layers)
+        # wte: vocab_size -> n_embd, lm_head: n_embd -> vocab_size
+        # We tie the transpose of wte.weight with lm_head.weight
+        self.transformer.wte.weight = self.lm_head.weight.T # transpose for proper dimensions
 
         # init all weights
         self.apply(self._init_weights)
@@ -150,9 +149,9 @@ class GPT(nn.Module):
     def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
+        For non_embedding count (default), the position embeddings get subtracted.
+        The token embeddings (now linear layer) are included in the count due to weight tying
+        with lm_head - these params are actually used as weights in the final layer.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -174,7 +173,10 @@ class GPT(nn.Module):
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        # convert indices to one-hot encoding
+        one_hot = torch.zeros(b, t, self.config.vocab_size, device=device, dtype=torch.float32)
+        one_hot.scatter_(2, idx.unsqueeze(-1), 1.0)
+        tok_emb = self.transformer.wte(one_hot) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
