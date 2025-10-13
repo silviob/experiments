@@ -327,36 +327,60 @@ class GPT(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        the sequence max_new_tokens times using probability distribution-based generation.
+        
+        Phase 1: Process conditioning sequence with two-stage forward pass to get probability distributions
+        Phase 2: Generate new tokens by feeding probability distributions back into the model
         """
+        # Phase 1: Process conditioning sequence with two-stage forward pass
+        if idx.size(1) > self.config.block_size:
+            idx_cond = idx[:, -self.config.block_size:]
+        else:
+            idx_cond = idx
+            
+        # Convert conditioning sequence to one-hot
+        one_hot_input = self.indices_to_one_hot(idx_cond, self.config.vocab_size)
+        
+        # Two-stage forward pass on conditioning sequence
+        # Stage 1: No-gradient forward pass to get initial logits
+        initial_logits, _ = self(one_hot_input * self.config.logit_onehot_fraction, None)
+        
+        # Stage 2: Combine initial logits with one-hot input
+        combined_input = self.combine_logits_with_onehot(initial_logits, one_hot_input)
+        
+        # Stage 3: Final forward pass to get probability distributions for conditioning sequence
+        logits, _ = self(combined_input)
+        conditioning_probs = F.softmax(logits, dim=-1)
+        
+        # Phase 2: Generate new tokens using probability distributions as input
+        current_probs = conditioning_probs  # Start with conditioning sequence distributions
+        
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # Single forward pass on sequence of probability distributions
+            logits, _ = self(current_probs)
             
-            # Convert indices to one-hot for the model
-            one_hot_input = self.indices_to_one_hot(idx_cond, self.config.vocab_size)
+            # Get logits for the next token (last position)
+            next_logits = logits[:, -1, :] / temperature
             
-            # Two-stage forward pass (same as training)
-            # Stage 1: No-gradient forward pass to get initial logits
-            initial_logits, _ = self(one_hot_input * self.config.logit_onehot_fraction, None)
-            
-            # Stage 2: Combine initial logits with one-hot input
-            combined_input = self.combine_logits_with_onehot(initial_logits, one_hot_input)
-            
-            # Stage 3: Final forward pass to get final logits
-            logits, _ = self(combined_input)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
+            # Apply top-k filtering if specified
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
+                v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                next_logits[next_logits < v[:, [-1]]] = -float('Inf')
+            
+            # Convert to probability distribution for next token
+            next_probs = F.softmax(next_logits, dim=-1)
+            
+            # Sample from the distribution (for output)
+            idx_next = torch.multinomial(next_probs, num_samples=1)
+            
+            # Append the probability distribution (not the sampled token) to the sequence
+            current_probs = torch.cat((current_probs, next_probs.unsqueeze(1)), dim=1)
+            
+            # Also append sampled token to idx for final output
             idx = torch.cat((idx, idx_next), dim=1)
-
+            
+            # Crop if sequence gets too long
+            if current_probs.size(1) > self.config.block_size:
+                current_probs = current_probs[:, -self.config.block_size:]
+                
         return idx
