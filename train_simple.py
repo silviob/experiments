@@ -180,6 +180,7 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        accuracies = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
@@ -192,9 +193,18 @@ def estimate_loss():
             
             # Stage 3: Final forward pass with loss computation
             with ctx:
-                _, loss = model(combined_input, Y)
+                logits, loss = model(combined_input, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+            
+            # Calculate accuracy
+            predictions = torch.argmax(logits, dim=-1)
+            correct = (predictions == Y).float()
+            accuracies[k] = correct.mean().item()
+            
+        out[split] = {
+            'loss': losses.mean(),
+            'accuracy': accuracies.mean()
+        }
     model.train()
     return out
 
@@ -231,18 +241,25 @@ while True:
 
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        metrics = estimate_loss()
+        train_loss = metrics['train']['loss']
+        val_loss = metrics['val']['loss']
+        train_acc = metrics['train']['accuracy']
+        val_acc = metrics['val']['accuracy']
+        
+        print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, train acc {train_acc:.4f}, val acc {val_acc:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "train/accuracy": train_acc,
+                "val/accuracy": val_acc,
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        if val_loss < best_val_loss or always_save_checkpoint:
+            best_val_loss = val_loss
             if iter_num > 0:
                 checkpoint = {
                     'model': model.state_dict(),
@@ -261,18 +278,9 @@ while True:
     for micro_step in range(gradient_accumulation_steps):
         X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
         
-        # Stage 1: No-gradient forward pass to get initial logits
-        with torch.no_grad():
-            with ctx:
-                model.eval()
-                initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
-                model.train()
-        
-        # Stage 2: Combine initial logits with one-hot input
-        combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
-        
-        # Stage 3: Final forward pass with gradients and loss computation
         with ctx:
+            initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
+            combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
             logits, loss = model(combined_input, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
