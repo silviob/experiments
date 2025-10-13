@@ -58,6 +58,8 @@ min_lr = 1e-4 # learning_rate / 10 usually
 device = 'cuda' # single GPU only
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# two-stage forward pass settings
+logit_onehot_fraction = 0.5 # fraction of one-hot to mix with initial logits
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -88,6 +90,19 @@ def get_batch(split):
     # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
     x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     return x, y
+
+def combine_logits_with_onehot(logits, one_hot, fraction):
+    """Combine initial logits with one-hot vectors using weighted sum"""
+    # Convert logits to probabilities (softmax)
+    probs = torch.softmax(logits, dim=-1)
+    
+    # Weighted combination: fraction * one_hot + (1-fraction) * probs
+    combined = fraction * one_hot + (1 - fraction) * probs
+    
+    # Ensure probabilities sum to 1.0 (renormalize)
+    combined = combined / combined.sum(dim=-1, keepdim=True)
+    
+    return combined
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -167,8 +182,9 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
+            X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss = model(X_one_hot, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -235,8 +251,18 @@ while True:
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
+        X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
+        
+        # Stage 1: No-gradient forward pass to get initial logits
+        with torch.no_grad():
+            initial_logits, _ = model(X_one_hot, None)  # No targets, no loss
+        
+        # Stage 2: Combine initial logits with one-hot input
+        combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
+        
+        # Stage 3: Final forward pass with gradients and loss computation
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss = model(combined_input, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

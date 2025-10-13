@@ -131,10 +131,8 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Weight tying between wte and lm_head (both are now linear layers)
-        # wte: vocab_size -> n_embd, lm_head: n_embd -> vocab_size
-        # We tie the transpose of wte.weight with lm_head.weight
-        self.transformer.wte.weight = self.lm_head.weight.T # transpose for proper dimensions
+        # Note: Weight tying removed - wte and lm_head are now independent linear layers
+        # This increases parameter count but allows for more flexible representations
 
         # init all weights
         self.apply(self._init_weights)
@@ -150,8 +148,7 @@ class GPT(nn.Module):
         """
         Return the number of parameters in the model.
         For non_embedding count (default), the position embeddings get subtracted.
-        The token embeddings (now linear layer) are included in the count due to weight tying
-        with lm_head - these params are actually used as weights in the final layer.
+        The token embeddings (now linear layer) are included in the count as independent parameters.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -166,17 +163,24 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    @staticmethod
+    def indices_to_one_hot(idx, vocab_size):
+        """Convert indices to one-hot encoded vectors"""
         device = idx.device
         b, t = idx.size()
+        one_hot = torch.zeros(b, t, vocab_size, device=device, dtype=torch.float32)
+        one_hot.scatter_(2, idx.unsqueeze(-1), 1.0)
+        return one_hot
+
+    def forward(self, one_hot_input, targets=None):
+        device = one_hot_input.device
+        b, t, vocab_size = one_hot_input.size()
+        assert vocab_size == self.config.vocab_size, f"Input vocab size {vocab_size} doesn't match model vocab size {self.config.vocab_size}"
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        # convert indices to one-hot encoding
-        one_hot = torch.zeros(b, t, self.config.vocab_size, device=device, dtype=torch.float32)
-        one_hot.scatter_(2, idx.unsqueeze(-1), 1.0)
-        tok_emb = self.transformer.wte(one_hot) # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(one_hot_input) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
