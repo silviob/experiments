@@ -39,13 +39,13 @@ block_size = 256 # context of up to 256 previous characters
 # model - baby GPT model :)
 n_layer = 2
 n_head = 8
-n_embd = 64
+n_embd = 128
 dropout = 0.0
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher
 max_iters = 50000
-weight_decay = 1e-1
+weight_decay = 1e-10
 beta1 = 0.9
 beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
