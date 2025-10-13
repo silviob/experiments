@@ -114,6 +114,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    logit_onehot_fraction: float = 0.1 # fraction of one-hot to mix with initial logits in two-stage forward pass
 
 class GPT(nn.Module):
 
@@ -171,6 +172,20 @@ class GPT(nn.Module):
         one_hot = torch.zeros(b, t, vocab_size, device=device, dtype=torch.float32)
         one_hot.scatter_(2, idx.unsqueeze(-1), 1.0)
         return one_hot
+
+    def combine_logits_with_onehot(self, logits, one_hot):
+        """Combine initial logits with one-hot vectors as a mixture of probability distributions"""
+        # Convert logits to probabilities (softmax)
+        probs = torch.softmax(logits, dim=-1)
+        
+        # Mixture of two probability distributions: fraction * one_hot + (1-fraction) * probs
+        # This is a proper convex combination of probability distributions
+        fraction = self.config.logit_onehot_fraction
+        combined = fraction * one_hot + (1 - fraction) * probs
+        
+        # The result is already a valid probability distribution (sums to 1.0)
+        # No need to renormalize since both components sum to 1.0
+        return combined
 
     def forward(self, one_hot_input, targets=None):
         device = one_hot_input.device
@@ -318,11 +333,19 @@ class GPT(nn.Module):
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            
             # Convert indices to one-hot for the model
             one_hot_input = self.indices_to_one_hot(idx_cond, self.config.vocab_size)
             
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(one_hot_input)
+            # Two-stage forward pass (same as training)
+            # Stage 1: No-gradient forward pass to get initial logits
+            initial_logits, _ = self(one_hot_input * self.config.logit_onehot_fraction, None)
+            
+            # Stage 2: Combine initial logits with one-hot input
+            combined_input = self.combine_logits_with_onehot(initial_logits, one_hot_input)
+            
+            # Stage 3: Final forward pass to get final logits
+            logits, _ = self(combined_input)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

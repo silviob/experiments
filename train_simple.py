@@ -91,18 +91,6 @@ def get_batch(split):
     x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     return x, y
 
-def combine_logits_with_onehot(logits, one_hot, fraction):
-    """Combine initial logits with one-hot vectors as a mixture of probability distributions"""
-    # Convert logits to probabilities (softmax)
-    probs = torch.softmax(logits, dim=-1)
-    
-    # Mixture of two probability distributions: fraction * one_hot + (1-fraction) * probs
-    # This is a proper convex combination of probability distributions
-    combined = fraction * one_hot + (1 - fraction) * probs
-    
-    # The result is already a valid probability distribution (sums to 1.0)
-    # No need to renormalize since both components sum to 1.0
-    return combined
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -189,7 +177,7 @@ def estimate_loss():
             initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
             
             # Stage 2: Combine initial logits with one-hot input
-            combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
+            combined_input = model.combine_logits_with_onehot(initial_logits, X_one_hot)
             
             # Stage 3: Final forward pass with loss computation
             with ctx:
@@ -280,7 +268,7 @@ while True:
         
         with ctx:
             initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
-            combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
+            combined_input = model.combine_logits_with_onehot(initial_logits, X_one_hot)
             logits, loss = model(combined_input, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
