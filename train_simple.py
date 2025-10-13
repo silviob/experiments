@@ -40,7 +40,7 @@ block_size = 256 # context of up to 256 previous characters
 n_layer = 2
 n_head = 8
 n_embd = 64
-dropout = 0.2
+dropout = 0.0
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher
@@ -59,7 +59,7 @@ device = 'cuda' # single GPU only
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # two-stage forward pass settings
-logit_onehot_fraction = 0.5 # fraction of one-hot to mix with initial logits
+logit_onehot_fraction = 0.1 # fraction of one-hot to mix with initial logits
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -92,16 +92,16 @@ def get_batch(split):
     return x, y
 
 def combine_logits_with_onehot(logits, one_hot, fraction):
-    """Combine initial logits with one-hot vectors using weighted sum"""
+    """Combine initial logits with one-hot vectors as a mixture of probability distributions"""
     # Convert logits to probabilities (softmax)
     probs = torch.softmax(logits, dim=-1)
     
-    # Weighted combination: fraction * one_hot + (1-fraction) * probs
+    # Mixture of two probability distributions: fraction * one_hot + (1-fraction) * probs
+    # This is a proper convex combination of probability distributions
     combined = fraction * one_hot + (1 - fraction) * probs
     
-    # Ensure probabilities sum to 1.0 (renormalize)
-    combined = combined / combined.sum(dim=-1, keepdim=True)
-    
+    # The result is already a valid probability distribution (sums to 1.0)
+    # No need to renormalize since both components sum to 1.0
     return combined
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -183,8 +183,16 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
+            
+            # Stage 1: No-gradient forward pass to get initial logits
+            initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
+            
+            # Stage 2: Combine initial logits with one-hot input
+            combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
+            
+            # Stage 3: Final forward pass with loss computation
             with ctx:
-                logits, loss = model(X_one_hot, Y)
+                _, loss = model(combined_input, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -255,7 +263,10 @@ while True:
         
         # Stage 1: No-gradient forward pass to get initial logits
         with torch.no_grad():
-            initial_logits, _ = model(X_one_hot, None)  # No targets, no loss
+            with ctx:
+                model.eval()
+                initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
+                model.train()
         
         # Stage 2: Combine initial logits with one-hot input
         combined_input = combine_logits_with_onehot(initial_logits, X_one_hot, logit_onehot_fraction)
