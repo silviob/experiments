@@ -114,7 +114,6 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    logit_onehot_fraction: float = 0.1 # fraction of one-hot to mix with initial logits in two-stage forward pass
 
 class GPT(nn.Module):
 
@@ -125,15 +124,15 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Linear(config.vocab_size, config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # Note: Weight tying removed - wte and lm_head are now independent linear layers
-        # This increases parameter count but allows for more flexible representations
+        # weight tying: wte and lm_head share the same weight matrix
+        self.transformer.wte.weight = self.lm_head.weight
 
         # init all weights
         self.apply(self._init_weights)
@@ -149,7 +148,7 @@ class GPT(nn.Module):
         """
         Return the number of parameters in the model.
         For non_embedding count (default), the position embeddings get subtracted.
-        The token embeddings (now linear layer) are included in the count as independent parameters.
+        The token embeddings are tied to the lm_head, so they don't add extra parameters.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -164,38 +163,16 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    @staticmethod
-    def indices_to_one_hot(idx, vocab_size):
-        """Convert indices to one-hot encoded vectors"""
+
+
+    def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
-        one_hot = torch.zeros(b, t, vocab_size, device=device, dtype=torch.float32)
-        one_hot.scatter_(2, idx.unsqueeze(-1), 1.0)
-        return one_hot
-
-    def combine_logits_with_onehot(self, logits, one_hot):
-        """Combine initial logits with one-hot vectors as a mixture of probability distributions"""
-        # Convert logits to probabilities (softmax)
-        probs = torch.softmax(logits, dim=-1)
-        
-        # Mixture of two probability distributions: fraction * one_hot + (1-fraction) * probs
-        # This is a proper convex combination of probability distributions
-        fraction = self.config.logit_onehot_fraction
-        combined = fraction * one_hot + (1 - fraction) * probs
-        
-        # The result is already a valid probability distribution (sums to 1.0)
-        # No need to renormalize since both components sum to 1.0
-        return combined
-
-    def forward(self, one_hot_input, targets=None):
-        device = one_hot_input.device
-        b, t, vocab_size = one_hot_input.size()
-        assert vocab_size == self.config.vocab_size, f"Input vocab size {vocab_size} doesn't match model vocab size {self.config.vocab_size}"
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(one_hot_input) # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
@@ -327,60 +304,25 @@ class GPT(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times using probability distribution-based generation.
-        
-        Phase 1: Process conditioning sequence with two-stage forward pass to get probability distributions
-        Phase 2: Generate new tokens by feeding probability distributions back into the model
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        # Phase 1: Process conditioning sequence with two-stage forward pass
-        if idx.size(1) > self.config.block_size:
-            idx_cond = idx[:, -self.config.block_size:]
-        else:
-            idx_cond = idx
-            
-        # Convert conditioning sequence to one-hot
-        one_hot_input = self.indices_to_one_hot(idx_cond, self.config.vocab_size)
-        
-        # Two-stage forward pass on conditioning sequence
-        # Stage 1: No-gradient forward pass to get initial logits
-        initial_logits, _ = self(one_hot_input * self.config.logit_onehot_fraction, None)
-        
-        # Stage 2: Combine initial logits with one-hot input
-        combined_input = self.combine_logits_with_onehot(initial_logits, one_hot_input)
-        
-        # Stage 3: Final forward pass to get probability distributions for conditioning sequence
-        logits, _ = self(combined_input)
-        conditioning_probs = F.softmax(logits, dim=-1)
-        
-        # Phase 2: Generate new tokens using probability distributions as input
-        current_probs = conditioning_probs  # Start with conditioning sequence distributions
-        
         for _ in range(max_new_tokens):
-            # Single forward pass on sequence of probability distributions
-            logits, _ = self(current_probs)
-            
-            # Get logits for the next token (last position)
-            next_logits = logits[:, -1, :] / temperature
-            
-            # Apply top-k filtering if specified
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
             if top_k is not None:
-                v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                next_logits[next_logits < v[:, [-1]]] = -float('Inf')
-            
-            # Convert to probability distribution for next token
-            next_probs = F.softmax(next_logits, dim=-1)
-            
-            # Sample from the distribution (for output)
-            idx_next = torch.multinomial(next_probs, num_samples=1)
-            
-            # Append the probability distribution (not the sampled token) to the sequence
-            current_probs = torch.cat((current_probs, next_probs.unsqueeze(1)), dim=1)
-            
-            # Also append sampled token to idx for final output
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-            
-            # Crop if sequence gets too long
-            if current_probs.size(1) > self.config.block_size:
-                current_probs = current_probs[:, -self.config.block_size:]
-                
+
         return idx

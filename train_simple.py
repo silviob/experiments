@@ -58,8 +58,6 @@ min_lr = 1e-4 # learning_rate / 10 usually
 device = 'cuda' # single GPU only
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
-# two-stage forward pass settings
-logit_onehot_fraction = 0.1 # fraction of one-hot to mix with initial logits
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -171,17 +169,8 @@ def estimate_loss():
         accuracies = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
-            
-            # Stage 1: No-gradient forward pass to get initial logits
-            initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
-            
-            # Stage 2: Combine initial logits with one-hot input
-            combined_input = model.combine_logits_with_onehot(initial_logits, X_one_hot)
-            
-            # Stage 3: Final forward pass with loss computation
             with ctx:
-                logits, loss = model(combined_input, Y)
+                logits, loss = model(X, Y)
             losses[k] = loss.item()
             
             # Calculate accuracy
@@ -264,12 +253,8 @@ while True:
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
-        X_one_hot = model.indices_to_one_hot(X, model.config.vocab_size)
-        
         with ctx:
-            initial_logits, _ = model(X_one_hot * logit_onehot_fraction, None)  # No targets, no loss
-            combined_input = model.combine_logits_with_onehot(initial_logits, X_one_hot)
-            logits, loss = model(combined_input, Y)
+            logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
