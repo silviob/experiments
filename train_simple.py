@@ -40,7 +40,7 @@ block_size = 256 # context of up to 256 previous characters
 n_layer = 2
 n_head = 8
 n_embd = 128
-recursion = 10
+recursion = 2
 dropout = 0.0
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer

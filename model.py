@@ -177,16 +177,24 @@ class GPT(nn.Module):
                 x = block(x)
             return self.transformer.ln_f(x)
 
+        def calculate_last(x, second_to_last, last):
+            for _ in range(self.config.recursion * 2):
+                second_to_last = transformer_pass(x + second_to_last + last)
+            last = transformer_pass(second_to_last + last)
+            return second_to_last, last
+
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         last = torch.zeros_like(x)
         second_to_last = torch.zeros_like(x)
-        for _ in range(self.config.recursion):
-            for _ in range(self.config.recursion * 2):
-                second_to_last = transformer_pass(x + second_to_last + last)
-            last = transformer_pass(second_to_last + last)
+
+        with torch.no_grad():
+            for _ in range(self.config.recursion - 1):
+                second_to_last, last = calculate_last(x, second_to_last, last)
+
+        _, last = calculate_last(x, second_to_last, last)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
