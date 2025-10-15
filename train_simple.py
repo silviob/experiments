@@ -261,19 +261,10 @@ while True:
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
-    # clip each parameter independently to its own p50 gradient magnitude
+    # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        
-        # Clip each parameter independently to its own p50
-        for param in model.parameters():
-            if param.grad is not None:
-                # Calculate p50 (median) of this parameter's gradient magnitudes
-                grad_mags = param.grad.data.abs().flatten()
-                p50_threshold = torch.quantile(grad_mags, 0.5)
-                
-                # Clip this parameter's gradients to its own p50 threshold
-                torch.nn.utils.clip_grad_norm_([param], p50_threshold.item())
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
