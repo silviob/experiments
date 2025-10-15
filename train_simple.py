@@ -170,10 +170,8 @@ def estimate_loss():
         accuracies = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            z = None
-            for _ in range(3):
-                with ctx:
-                    logits, loss, z = model((X, z), Y)
+            with ctx:
+                logits, loss, _ = model(X, Y)
             losses[k] = loss.item()
             
             # Calculate accuracy
