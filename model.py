@@ -176,7 +176,7 @@ class GPT(nn.Module):
 
         def transformer_pass(x, recursion_step):
             # Add recursion embedding
-            rec_emb = self.transformer.wre(recursion_step)  # shape (n_embd,)
+            rec_emb = self.transformer.wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
             rec_emb = rec_emb.unsqueeze(0).unsqueeze(0)  # shape (1, 1, n_embd)
             rec_emb = rec_emb.expand(b, t, -1)  # shape (b, t, n_embd)
             
