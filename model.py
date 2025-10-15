@@ -166,7 +166,8 @@ class GPT(nn.Module):
 
 
 
-    def forward(self, idx, targets=None):
+    def forward(self, p, targets=None):
+        (idx, z) = p
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -181,24 +182,25 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        last = torch.zeros_like(x)
+        if z is None:
+            z = torch.zeros_like(x)
 
         with torch.no_grad():
             for _ in range(self.config.recursion - 1):
-                transformer_pass(x + last)
+                z = transformer_pass(x + z)
 
-        last = transformer_pass(x + last)
+        z = transformer_pass(x + z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(last)
+            logits = self.lm_head(z)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(last[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(z[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return logits, loss
+        return logits, loss, z.detach()
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
