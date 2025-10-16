@@ -189,31 +189,8 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        
-        # Enrich token embeddings through non-causal attention on full vocabulary
-        b, t, _ = tok_emb.shape
-        
-        # Query: current token embeddings (b, t, n_embd)
-        # Key: wte.weight (vocab_size, n_embd) -> (1, 1, vocab_size, n_embd)
-        # Value: wte.weight (vocab_size, n_embd) -> (1, 1, vocab_size, n_embd)
-        query = tok_emb.unsqueeze(1)  # Shape: (b, 1, t, n_embd)
-        key = self.transformer.wte.weight.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, vocab_size, n_embd)
-        value = self.transformer.wte.weight.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, vocab_size, n_embd)
-        
-        # Apply non-causal attention to enrich token embeddings
-        enriched_emb = F.scaled_dot_product_attention(
-            query=query,
-            key=key, 
-            value=value,
-            is_causal=False,  # Non-causal attention
-            scale=None  # Use default scaling
-        )  # Shape: (b, 1, t, n_embd)
-        
-        # Remove the extra dimension
-        enriched_emb = enriched_emb.squeeze(1)  # Shape: (b, t, n_embd)
-        
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(enriched_emb + pos_emb)
+        x = self.transformer.drop(tok_emb + pos_emb)
         
         z = torch.zeros_like(x)
 
