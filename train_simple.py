@@ -268,19 +268,26 @@ while True:
     # Calculate total gradient norm using get_total_norm (before clipping)
     total_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters()])
     
-    # Find parameter with highest gradient norm
+    # Find parameter with highest and lowest gradient norm
     max_norm = 0.0
     max_norm_param_name = ""
+    min_norm = float('inf')
+    min_norm_param_name = ""
     for name, param in model.named_parameters():
         if param.grad is not None:
             param_norm = torch.nn.utils.get_total_norm([param.grad])
+            # Remove _orig_mod. prefix if present
+            clean_name = name.replace('_orig_mod.', '')
             if param_norm > max_norm:
                 max_norm = param_norm
-                max_norm_param_name = name
+                max_norm_param_name = clean_name
+            if param_norm < min_norm:
+                min_norm = param_norm
+                min_norm_param_name = clean_name
     
     # Log statistics to output.txt
     with open('output.txt', 'a') as f:
-        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {total_grad_norm:>8.3f} {max_norm_param_name}\n")
+        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {total_grad_norm:>8.3f} {max_norm:>8.3f} {max_norm_param_name} {min_norm:>8.3f} {min_norm_param_name}\n")
     
     # clip the gradient
     if grad_clip != 0.0:
