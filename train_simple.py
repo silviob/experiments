@@ -160,6 +160,37 @@ if compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
+# Display comprehensive gradient norm statistics
+def display_gradient_stats():
+    if not param_norm_stats:
+        print("No gradient statistics available.")
+        return
+    
+    # Calculate median for each parameter and sort by median
+    param_medians = []
+    for name, stats in param_norm_stats.items():
+        if stats['values']:
+            median_val = torch.median(torch.tensor(stats['values'])).item()
+            param_medians.append((name, stats['min'], stats['max'], median_val))
+    
+    # Sort by median (descending)
+    param_medians.sort(key=lambda x: x[3], reverse=True)
+    
+    # Display table
+    print("\n" + "="*80)
+    print("GRADIENT NORM STATISTICS (sorted by median)")
+    print("="*80)
+    print(f"{'Parameter Name':<50} {'Min':<8} {'Max':<8} {'Median':<8}")
+    print("-"*80)
+    
+    for name, min_val, max_val, median_val in param_medians:
+        print(f"{name:<50} {min_val:<8.3f} {max_val:<8.3f} {median_val:<8.3f}")
+    
+    print("="*80)
+    
+    # Reset statistics for next evaluation period
+    param_norm_stats.clear()
+
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
@@ -211,6 +242,9 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
 output = open('output.txt', 'w')
+
+# Global dictionary to track gradient norms for all parameters
+param_norm_stats = {}
 while True:
 
     # determine and set the learning rate for this iteration
@@ -227,6 +261,10 @@ while True:
         val_acc = metrics['val']['accuracy']
         
         print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, train acc {train_acc:.4f}, val acc {val_acc:.4f}")
+        
+        # Display comprehensive gradient norm statistics
+        display_gradient_stats()
+        
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -273,17 +311,35 @@ while True:
     max_norm_param_name = ""
     min_norm = float('inf')
     min_norm_param_name = ""
+    
+    # Collect gradient norms for all parameters
     for name, param in model.named_parameters():
         if param.grad is not None:
             param_norm = torch.nn.utils.get_total_norm([param.grad])
             # Remove _orig_mod. prefix if present
             clean_name = name.replace('_orig_mod.', '')
+            
+            # Track for current batch min/max
             if param_norm > max_norm:
                 max_norm = param_norm
                 max_norm_param_name = clean_name
             if param_norm < min_norm:
                 min_norm = param_norm
                 min_norm_param_name = clean_name
+            
+            # Accumulate statistics for comprehensive analysis
+            if clean_name not in param_norm_stats:
+                param_norm_stats[clean_name] = {
+                    'values': [],
+                    'min': float('inf'),
+                    'max': 0.0
+                }
+            
+            # Update statistics
+            stats = param_norm_stats[clean_name]
+            stats['values'].append(param_norm)
+            stats['min'] = min(stats['min'], param_norm)
+            stats['max'] = max(stats['max'], param_norm)
     
     # Log statistics to output.txt
     with open('output.txt', 'a') as f:
