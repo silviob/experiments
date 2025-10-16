@@ -164,7 +164,54 @@ class GPT(nn.Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Get the shape of existing embedding weights
+            vocab_size, n_embd = module.weight.shape
+            
+            # Generate random matrix
+            random_matrix = torch.randn(vocab_size, n_embd)
+            
+            # Perform SVD to get orthogonal vectors
+            U, _, V = torch.svd(random_matrix)
+            
+            # Reconstruct orthogonal matrix
+            orthogonal_matrix = U @ V.T
+            
+            # Center the embeddings (mean = 0)
+            orthogonal_matrix = orthogonal_matrix - orthogonal_matrix.mean(dim=0, keepdim=True)
+            
+            # Scale to target std (0.02)
+            current_std = orthogonal_matrix.std()
+            orthogonal_matrix = orthogonal_matrix * (0.02 / current_std)
+            
+            # Assign to existing embedding weights
+            module.weight.data = orthogonal_matrix
+
+    def verify_embedding_distribution(self):
+        """Verify that embeddings have the desired properties: centered, scaled, and orthogonal"""
+        print("=== Embedding Distribution Verification ===")
+        
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Embedding):
+                weight = module.weight
+                print(f"\n{name}:")
+                print(f"  Shape: {weight.shape}")
+                print(f"  Mean: {weight.mean():.6f}")
+                print(f"  Std: {weight.std():.6f}")
+                
+                # Check orthogonality by sampling cosine similarities
+                similarities = []
+                for _ in range(min(1000, weight.size(0) * (weight.size(0) - 1) // 2)):
+                    i, j = torch.randint(0, weight.size(0), (2,))
+                    if i != j:
+                        cos_sim = F.cosine_similarity(weight[i], weight[j], dim=0)
+                        similarities.append(cos_sim.item())
+                
+                if similarities:
+                    similarities = torch.tensor(similarities)
+                    print(f"  Cosine similarity mean: {similarities.mean():.6f}")
+                    print(f"  Cosine similarity std: {similarities.std():.6f}")
+                    print(f"  Max cosine similarity: {similarities.max():.6f}")
+                    print(f"  Min cosine similarity: {similarities.min():.6f}")
 
 
 
