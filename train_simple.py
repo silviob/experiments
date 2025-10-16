@@ -266,14 +266,14 @@ while True:
     scaler.unscale_(optimizer)
     
     # Calculate total gradient norm using get_total_norm (before clipping)
-    total_grad_norm = torch.nn.utils.clip_grad_norm_.get_total_norm(model.parameters())
+    total_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters()])
     
     # Find parameter with highest gradient norm
     max_norm = 0.0
     max_norm_param_name = ""
     for name, param in model.named_parameters():
         if param.grad is not None:
-            param_norm = torch.nn.utils.clip_grad_norm_.get_total_norm([param])
+            param_norm = torch.nn.utils.get_total_norm([param.grad])
             if param_norm > max_norm:
                 max_norm = param_norm
                 max_norm_param_name = name
