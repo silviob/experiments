@@ -210,6 +210,7 @@ X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
+output = open('output.txt', 'w')
 while True:
 
     # determine and set the learning rate for this iteration
@@ -261,9 +262,28 @@ while True:
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+    # calculate statistics before gradient clipping
+    scaler.unscale_(optimizer)
+    
+    # Calculate total gradient norm using get_total_norm (before clipping)
+    total_grad_norm = torch.nn.utils.clip_grad_norm_.get_total_norm(model.parameters())
+    
+    # Find parameter with highest gradient norm
+    max_norm = 0.0
+    max_norm_param_name = ""
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            param_norm = torch.nn.utils.clip_grad_norm_.get_total_norm([param])
+            if param_norm > max_norm:
+                max_norm = param_norm
+                max_norm_param_name = name
+    
+    # Log statistics to output.txt
+    with open('output.txt', 'a') as f:
+        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {total_grad_norm:>8.3f} {max_norm_param_name}\n")
+    
     # clip the gradient
     if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
