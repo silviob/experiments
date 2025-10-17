@@ -202,15 +202,15 @@ class GPT(nn.Module):
         for recursion_step in range(self.config.recursion):
             z = transformer_pass(x + z, recursion_step)
 
+        logits = self.lm_head(z)
+        q_hat = self.q_attn(z)
+        q_head_output = self.q_head(q_hat)  # (b, t, 1)
+        q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
+        
+        # Store latest q_head output for inspection
+        self.latest_q_head_output = q_head_output
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(z)
-            q_hat = self.q_attn(z)
-            q_head_output = self.q_head(q_hat)  # (b, t, 1)
-            q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
-            
-            # Store latest q_head output for inspection
-            self.latest_q_head_output = q_head_output
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             # Get model's predictions using argmax
             pred_tokens = torch.argmax(logits, dim=-1)  # (b, t)
@@ -225,8 +225,6 @@ class GPT(nn.Module):
                 reduction='mean'  # Return reduced loss
             )
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(z[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
             q_loss = None
 

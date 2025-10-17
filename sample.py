@@ -18,7 +18,7 @@ init_from = 'resume' # 'resume' from an out_dir
 out_dir = 'out-shakespeare-char' # directory where model was saved
 start = "\n" # starting prompt
 num_samples = 10 # number of samples to draw
-max_new_tokens = 500 # number of tokens generated in each sample
+max_new_tokens = 200 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random
 top_k = 200 # retain only the top_k most likely tokens
 seed = 1337
@@ -85,7 +85,7 @@ with torch.no_grad():
             
             for iteration in range(max_iterations):
                 # Generate sequence from current conditioning
-                y, q_loss = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+                y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
                 
                 # Get the q_head output from the model's latest forward pass
                 q_head_output = model.latest_q_head_output  # (1, t, 1)
@@ -96,26 +96,40 @@ with torch.no_grad():
                 # Convert logits to probabilities [0, 1] using sigmoid
                 q_probs = torch.sigmoid(q_logits)  # (t,)
                 
-                # Find first low confidence token
+                # Print intermediate iteration result
+                decoded_text = decode(y[0].tolist())
+                colored_text = ""
+                for i, char in enumerate(decoded_text):
+                    if i < len(q_probs):
+                        if q_probs[i] < 0.5:  # Low probability = likely incorrect
+                            colored_text += f"{Colors.RED}{char}{Colors.RESET}"
+                        else:  # High probability = likely correct
+                            colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
+                    else:
+                        colored_text += char
+                
+                print(f"Iteration {iteration + 1}: {colored_text}")
+                
+                # Skip low confidence check over conditioning tokens (already vetted)
+                conditioning_length = current_x.size(1)
+                
+                # Find first low confidence token in newly generated part only
                 first_low_conf_idx = None
-                for i, prob in enumerate(q_probs):
-                    if prob < 0.5:
+                for i in range(conditioning_length, len(q_probs)):
+                    if q_probs[i] < 0.5:
                         first_low_conf_idx = i
                         break
                 
-                # If no low confidence tokens found, we're done
+                # If no low confidence tokens found in new part, we're done
                 if first_low_conf_idx is None:
                     break
                 
                 # Truncate at first low confidence token and use as new conditioning
-                if first_low_conf_idx > 0:
+                if first_low_conf_idx > conditioning_length:
                     current_x = y[:, :first_low_conf_idx]  # Keep only good tokens
-                else:
-                    # If first token is low confidence, break to avoid infinite loop
-                    break
             
             # Final generation result
-            y, q_loss = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
             
             # Get final q_head output for coloring
             q_head_output = model.latest_q_head_output  # (1, t, 1)
@@ -138,5 +152,4 @@ with torch.no_grad():
                     colored_text += char
             
             print(colored_text)
-            print(f"Overall q_loss: {q_loss.item():.4f}")
             print('---------------')
