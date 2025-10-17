@@ -136,7 +136,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.q_attn = SelfAttention(config, causal=False)
-        self.q_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.q_head = nn.Linear(config.n_embd, 1, bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -203,7 +203,7 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(z)
             q_hat = self.q_attn(z)
-            q_hat = self.q_head(q_hat)
+            q_hat = self.q_head(q_hat).squeeze(-1)  # (b, t, 1) -> (b, t)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             # Get model's predictions using argmax
             pred_tokens = torch.argmax(logits, dim=-1)  # (b, t)
