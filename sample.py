@@ -79,18 +79,50 @@ x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y, q_loss = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            # Iterative refinement using q_probs
+            current_x = x.clone()  # Start with original conditioning sequence
+            max_iterations = 5
             
-            # Get the q_head output from the model's latest forward pass
+            for iteration in range(max_iterations):
+                # Generate sequence from current conditioning
+                y, q_loss = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+                
+                # Get the q_head output from the model's latest forward pass
+                q_head_output = model.latest_q_head_output  # (1, t, 1)
+                
+                # q_head outputs logits for binary classification (correctness probability)
+                q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
+                
+                # Convert logits to probabilities [0, 1] using sigmoid
+                q_probs = torch.sigmoid(q_logits)  # (t,)
+                
+                # Find first low confidence token
+                first_low_conf_idx = None
+                for i, prob in enumerate(q_probs):
+                    if prob < 0.5:
+                        first_low_conf_idx = i
+                        break
+                
+                # If no low confidence tokens found, we're done
+                if first_low_conf_idx is None:
+                    break
+                
+                # Truncate at first low confidence token and use as new conditioning
+                if first_low_conf_idx > 0:
+                    current_x = y[:, :first_low_conf_idx]  # Keep only good tokens
+                else:
+                    # If first token is low confidence, break to avoid infinite loop
+                    break
+            
+            # Final generation result
+            y, q_loss = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+            
+            # Get final q_head output for coloring
             q_head_output = model.latest_q_head_output  # (1, t, 1)
-            
-            # q_head outputs logits for binary classification (correctness probability)
             q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
-            
-            # Convert logits to probabilities [0, 1] using sigmoid
             q_probs = torch.sigmoid(q_logits)  # (t,)
             
-            # Decode the generated text
+            # Decode the final generated text
             decoded_text = decode(y[0].tolist())
             
             # Color each character based on its q_head probability
