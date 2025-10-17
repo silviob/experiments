@@ -202,7 +202,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss, _ = model(X, Y)
+                logits, loss, q_loss = model(X, Y)
             losses[k] = loss.item()
             
             # Calculate accuracy
@@ -242,6 +242,8 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
 output = open('output.txt', 'w')
+output.write("iteration    loss     q_loss   grad_norm max_norm  max_param                    min_norm  min_param\n")
+output.close()
 
 # Global dictionary to track gradient norms for all parameters
 param_norm_stats = {}
@@ -294,12 +296,17 @@ while True:
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
-            logits, loss, z = model(X, Y)
+            logits, loss, q_loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            if q_loss is not None:
+                q_loss = q_loss / gradient_accumulation_steps # scale the q_loss as well
+                total_loss = loss + q_loss  # combine both losses
+            else:
+                total_loss = loss
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
+        scaler.scale(total_loss).backward()
     # calculate statistics before gradient clipping
     scaler.unscale_(optimizer)
     
@@ -343,7 +350,8 @@ while True:
     
     # Log statistics to output.txt
     with open('output.txt', 'a') as f:
-        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {total_grad_norm:>8.3f} {max_norm:>8.3f} {max_norm_param_name} {min_norm:>8.3f} {min_norm_param_name}\n")
+        q_loss_val = q_loss.item() * gradient_accumulation_steps if q_loss is not None else 0.0
+        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {q_loss_val:>8.3f} {total_grad_norm:>8.3f} {max_norm:>8.3f} {max_norm_param_name} {min_norm:>8.3f} {min_norm_param_name}\n")
     
     # clip the gradient
     if grad_clip != 0.0:

@@ -26,9 +26,9 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-class CausalSelfAttention(nn.Module):
+class SelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, causal=True):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -41,6 +41,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.causal = causal
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -58,14 +59,15 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.causal)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if self.causal:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -96,7 +98,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = SelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -133,8 +135,8 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # weight tying: wte and lm_head share the same weight matrix
-        self.transformer.wte.weight = self.lm_head.weight
+        self.q_attn = SelfAttention(config, causal=False)
+        self.q_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -200,13 +202,28 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(z)
+            q_hat = self.q_attn(z)
+            q_hat = self.q_head(q_hat)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # Get model's predictions using argmax
+            pred_tokens = torch.argmax(logits, dim=-1)  # (b, t)
+            
+            # Create binary mask: 1 if prediction matches target, 0 otherwise
+            correct_mask = (pred_tokens == targets).float()  # (b, t)
+            
+            # Binary cross entropy loss between q_hat and correct_mask
+            q_loss = F.binary_cross_entropy_with_logits(
+                q_hat.view(-1),  # Flatten q_hat to (b*t,)
+                correct_mask.view(-1),  # Flatten correct_mask to (b*t,)
+                reduction='mean'
+            )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(z[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
+            q_loss = None
 
-        return logits, loss, z.detach()
+        return logits, loss, q_loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -329,7 +346,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _, z = self(idx_cond)
+            logits, _, q_loss = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
