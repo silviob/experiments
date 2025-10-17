@@ -87,17 +87,20 @@ with torch.no_grad():
             # q_head outputs logits for binary classification (correctness probability)
             q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
             
+            # Convert logits to probabilities [0, 1] using sigmoid
+            q_probs = torch.sigmoid(q_logits)  # (t,)
+            
             # Decode the generated text
             decoded_text = decode(y[0].tolist())
             
-            # Color each character based on its q_head logit
-            # Higher logits = more confident the prediction is correct
+            # Color each character based on its q_head probability
+            # Higher probabilities = more confident the prediction is correct
             colored_text = ""
             for i, char in enumerate(decoded_text):
-                if i < len(q_logits):
-                    if q_logits[i] < 0.0:  # Negative logit = likely incorrect
+                if i < len(q_probs):
+                    if q_probs[i] < 0.5:  # Low probability = likely incorrect
                         colored_text += f"{Colors.RED}{char}{Colors.RESET}"
-                    else:  # Positive logit = likely correct
+                    else:  # High probability = likely correct
                         colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
                 else:
                     colored_text += char
