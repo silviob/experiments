@@ -7,6 +7,12 @@ from contextlib import nullcontext
 import torch
 from model import GPTConfig, GPT
 
+# Color codes for terminal output
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    RESET = '\033[0m'
+
 # -----------------------------------------------------------------------------
 init_from = 'resume' # 'resume' from an out_dir
 out_dir = 'out-shakespeare-char' # directory where model was saved
@@ -73,6 +79,27 @@ x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
+            y, q_loss = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            
+            # Get per-token q_loss for the generated sequence
+            # We need to call model.forward() again to get the non-reduced q_loss
+            generated_sequence = y[0]  # Get the generated sequence
+            _, _, per_token_q_loss = model(generated_sequence.unsqueeze(0))
+            
+            # Decode the generated text
+            decoded_text = decode(generated_sequence.tolist())
+            
+            # Color each character based on its q_loss
+            colored_text = ""
+            for i, char in enumerate(decoded_text):
+                if i < len(per_token_q_loss):
+                    if per_token_q_loss[i] < 0.5:
+                        colored_text += f"{Colors.RED}{char}{Colors.RESET}"
+                    else:
+                        colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
+                else:
+                    colored_text += char
+            
+            print(colored_text)
+            print(f"Overall q_loss: {q_loss.mean().item():.4f}")
             print('---------------')

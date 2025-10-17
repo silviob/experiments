@@ -215,7 +215,7 @@ class GPT(nn.Module):
             q_loss = F.binary_cross_entropy_with_logits(
                 q_hat.view(-1),  # Flatten q_hat to (b*t,)
                 correct_mask.view(-1),  # Flatten correct_mask to (b*t,)
-                reduction='mean'
+                reduction='none'  # Return non-reduced loss
             )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -360,4 +360,8 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx
+        # One more forward pass to get q_loss for the final generated sequence
+        idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+        _, _, final_q_loss = self(idx_cond)
+
+        return idx, final_q_loss.mean()

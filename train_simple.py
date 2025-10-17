@@ -205,7 +205,7 @@ def estimate_loss():
             with ctx:
                 logits, loss, q_loss = model(X, Y)
             losses[k] = loss.item()
-            q_losses[k] = q_loss.item() if q_loss is not None else 0.0
+            q_losses[k] = q_loss.mean().item() if q_loss is not None else 0.0
             
             # Calculate accuracy
             predictions = torch.argmax(logits, dim=-1)
@@ -306,7 +306,7 @@ while True:
             logits, loss, q_loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             if q_loss is not None:
-                q_loss = q_loss / gradient_accumulation_steps # scale the q_loss as well
+                q_loss = q_loss.mean() / gradient_accumulation_steps # reduce and scale the q_loss
                 total_loss = loss + q_loss  # combine both losses
             else:
                 total_loss = loss
