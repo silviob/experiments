@@ -137,6 +137,9 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.q_attn = SelfAttention(config, causal=False)
         self.q_head = nn.Linear(config.n_embd, 1, bias=False)
+        
+        # Store latest q_head output for inspection
+        self.latest_q_head_output = None
 
         # init all weights
         self.apply(self._init_weights)
@@ -203,7 +206,11 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(z)
             q_hat = self.q_attn(z)
-            q_hat = self.q_head(q_hat).squeeze(-1)  # (b, t, 1) -> (b, t)
+            q_head_output = self.q_head(q_hat)  # (b, t, 1)
+            q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
+            
+            # Store latest q_head output for inspection
+            self.latest_q_head_output = q_head_output
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             # Get model's predictions using argmax
             pred_tokens = torch.argmax(logits, dim=-1)  # (b, t)
@@ -215,7 +222,7 @@ class GPT(nn.Module):
             q_loss = F.binary_cross_entropy_with_logits(
                 q_hat.view(-1),  # Flatten q_hat to (b*t,)
                 correct_mask.view(-1),  # Flatten correct_mask to (b*t,)
-                reduction='none'  # Return non-reduced loss
+                reduction='mean'  # Return reduced loss
             )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -364,4 +371,4 @@ class GPT(nn.Module):
         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
         _, _, final_q_loss = self(idx_cond)
 
-        return idx, final_q_loss.mean()
+        return idx, final_q_loss

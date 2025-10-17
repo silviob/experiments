@@ -81,25 +81,27 @@ with torch.no_grad():
         for k in range(num_samples):
             y, q_loss = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
             
-            # Get per-token q_loss for the generated sequence
-            # We need to call model.forward() again to get the non-reduced q_loss
-            generated_sequence = y[0]  # Get the generated sequence
-            _, _, per_token_q_loss = model(generated_sequence.unsqueeze(0))
+            # Get the q_head output from the model's latest forward pass
+            q_head_output = model.latest_q_head_output  # (1, t, 1)
+            
+            # q_head outputs logits for binary classification (correctness probability)
+            q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
             
             # Decode the generated text
-            decoded_text = decode(generated_sequence.tolist())
+            decoded_text = decode(y[0].tolist())
             
-            # Color each character based on its q_loss
+            # Color each character based on its q_head logit
+            # Higher logits = more confident the prediction is correct
             colored_text = ""
             for i, char in enumerate(decoded_text):
-                if i < len(per_token_q_loss):
-                    if per_token_q_loss[i] < 0.5:
+                if i < len(q_logits):
+                    if q_logits[i] < 0.0:  # Negative logit = likely incorrect
                         colored_text += f"{Colors.RED}{char}{Colors.RESET}"
-                    else:
+                    else:  # Positive logit = likely correct
                         colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
                 else:
                     colored_text += char
             
             print(colored_text)
-            print(f"Overall q_loss: {q_loss.mean().item():.4f}")
+            print(f"Overall q_loss: {q_loss.item():.4f}")
             print('---------------')
