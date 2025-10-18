@@ -39,7 +39,7 @@ block_size = 256 # context of up to 256 previous characters
 # model - baby GPT model :)
 n_layer = 2
 n_head = 8
-n_embd = 128
+n_embd = 512
 recursion = 8
 dropout = 0.0
 bias = False # do we use bias inside LayerNorm and Linear layers?
@@ -241,9 +241,6 @@ X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
-output = open('output.txt', 'w')
-output.write("iteration    loss     grad_norm max_norm  max_param                    min_norm  min_param\n")
-output.close()
 
 # Global dictionary to track gradient norms for all parameters
 param_norm_stats = {}
@@ -342,12 +339,7 @@ while True:
             stats['values'].append(param_norm)
             stats['min'] = min(stats['min'], param_norm)
             stats['max'] = max(stats['max'], param_norm)
-    
-    # Log statistics to output.txt
-    with open('output.txt', 'a') as f:
-        q_loss_val = 0.0
-        f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {q_loss_val:>8.3f} {total_grad_norm:>8.3f} {max_norm:>8.3f} {max_norm_param_name} {min_norm:>8.3f} {min_norm_param_name}\n")
-    
+        
     # clip the gradient
     if grad_clip != 0.0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)

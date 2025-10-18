@@ -160,13 +160,13 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        
+        z = torch.zeros_like(x)
         # Recurrent processing through transformer blocks
         for _ in range(self.config.recursion):
             for block in self.transformer.h:
-                x = block(x)
-            x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+                z = block(z + x)
+            z = self.transformer.ln_f(z)
+        logits = self.lm_head(z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
