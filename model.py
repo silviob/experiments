@@ -42,13 +42,6 @@ class SelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.causal = causal
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -59,18 +52,8 @@ class SelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        # self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.causal)
-        else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            if self.causal:
-                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # efficient attention using Flash Attention CUDA kernels
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.causal)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -129,13 +112,13 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            wre = nn.Embedding(config.recursion, config.n_embd),
+            wre_y = nn.Embedding(config.recursion, config.n_embd),
+            wre_q = nn.Embedding(config.recursion, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.q_attn = SelfAttention(config, causal=False)
         self.q_head = nn.Linear(config.n_embd, 1, bias=False)
         
         # Store latest q_head output for inspection
@@ -160,7 +143,8 @@ class GPT(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
-            n_params -= self.transformer.wre.weight.numel()
+            n_params -= self.transformer.wre_y.weight.numel()
+            n_params -= self.transformer.wre_q.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -179,9 +163,9 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        def transformer_pass(x, recursion_step):
+        def transformer_pass(x, wre, recursion_step, causal):
             # Add recursion embedding
-            rec_emb = self.transformer.wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
+            rec_emb = wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
             rec_emb = rec_emb.unsqueeze(0).unsqueeze(0)  # shape (1, 1, n_embd)
             rec_emb = rec_emb.expand(b, t, -1)  # shape (b, t, n_embd)
             
@@ -189,6 +173,7 @@ class GPT(nn.Module):
             x = x + rec_emb
             
             for block in self.transformer.h:
+                block.attn.causal = causal
                 x = block(x)
             return self.transformer.ln_f(x)
 
@@ -197,18 +182,21 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         
+
         z = torch.zeros_like(x)
-
         for recursion_step in range(self.config.recursion):
-            z = transformer_pass(x + z, recursion_step)
-
+            z = transformer_pass(x + z, self.transformer.wre_y, recursion_step, True)
         logits = self.lm_head(z)
-        q_hat = self.q_attn(z)
-        q_head_output = self.q_head(q_hat)  # (b, t, 1)
-        q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
         
-        # Store latest q_head output for inspection
+        z0 = z.detach()
+        z_q = torch.zeros_like(x)
+        for recursion_step in range(self.config.recursion):
+            z_q = transformer_pass(z0 + z_q, self.transformer.wre_q, recursion_step, False)                                                                        
+        q_head_output = self.q_head(z_q)  # (b, t, 1)
+        q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
+
         self.latest_q_head_output = q_head_output
+
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)

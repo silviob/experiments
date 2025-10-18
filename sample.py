@@ -85,7 +85,7 @@ with torch.no_grad():
             
             for iteration in range(max_iterations):
                 # Generate sequence from current conditioning
-                y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+                y, _ = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
                 
                 # Get the q_head output from the model's latest forward pass
                 q_head_output = model.latest_q_head_output  # (1, t, 1)
@@ -129,7 +129,7 @@ with torch.no_grad():
                     current_x = y[:, :first_low_conf_idx]  # Keep only good tokens
             
             # Final generation result
-            y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y, _ = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
             
             # Get final q_head output for coloring
             q_head_output = model.latest_q_head_output  # (1, t, 1)
