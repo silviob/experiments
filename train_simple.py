@@ -33,7 +33,6 @@ wandb_project = 'mammals batch 32'
 wandb_run_name = 'recursive 2 8 512 1 '
 # data
 dataset = 'shakespeare_char'
-gradient_accumulation_steps = 1
 batch_size = 32
 block_size = 256 # context of up to 256 previous characters
 # model - baby GPT model :)
@@ -71,7 +70,7 @@ device_type = 'cuda' # always cuda for single GPU
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-tokens_per_iter = gradient_accumulation_steps * batch_size * block_size
+tokens_per_iter = batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 # poor man's data loader
@@ -203,7 +202,8 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
-            losses[k] = loss.item()
+            # loss is now (batch_size, seq_len), so we need to average it
+            losses[k] = loss.mean().item()
             
             # Calculate accuracy
             predictions = torch.argmax(logits, dim=-1)
@@ -289,65 +289,74 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-    # forward backward update, with optional gradient accumulation to simulate larger batch size
-    # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
-        with ctx:
-            logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # calculate statistics before gradient clipping
-    scaler.unscale_(optimizer)
+    # forward backward update, processing each sample individually
+    with ctx:
+        logits, loss = model(X, Y)  # loss shape: (batch_size, seq_len)
     
-    # Calculate total gradient norm using get_total_norm (before clipping)
-    total_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters()])
-    
-    # Find parameter with highest and lowest gradient norm
+    # Process each sample in the batch individually
+    batch_size = X.size(0)
+    total_grad_norm = 0.0
     max_norm = 0.0
     max_norm_param_name = ""
     min_norm = float('inf')
     min_norm_param_name = ""
     
-    # Collect gradient norms for all parameters
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            param_norm = torch.nn.utils.get_total_norm([param.grad])
-            # Remove _orig_mod. prefix if present
-            clean_name = name.replace('_orig_mod.', '')
-            
-            # Track for current batch min/max
-            if param_norm > max_norm:
-                max_norm = param_norm
-                max_norm_param_name = clean_name
-            if param_norm < min_norm:
-                min_norm = param_norm
-                min_norm_param_name = clean_name
-            
-            # Accumulate statistics for comprehensive analysis
-            if clean_name not in param_norm_stats:
-                param_norm_stats[clean_name] = {
-                    'values': [],
-                    'min': float('inf'),
-                    'max': 0.0
-                }
-            
-            # Update statistics
-            stats = param_norm_stats[clean_name]
-            stats['values'].append(param_norm)
-            stats['min'] = min(stats['min'], param_norm)
-            stats['max'] = max(stats['max'], param_norm)
+    for sample_idx in range(batch_size):
+        # Get loss for this sample (sum over sequence length)
+        sample_loss = loss[sample_idx].sum()  # scalar loss for this sample
         
-    # clip the gradient
-    if grad_clip != 0.0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+        # Zero gradients before processing this sample
+        optimizer.zero_grad(set_to_none=True)
+        
+        # Backward pass for this sample
+        scaler.scale(sample_loss).backward()
+        
+        # Calculate gradient statistics for this sample
+        scaler.unscale_(optimizer)
+        
+        # Calculate total gradient norm for this sample
+        sample_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters() if param.grad is not None])
+        total_grad_norm += sample_grad_norm
+        
+        # Find parameter with highest and lowest gradient norm for this sample
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                param_norm = torch.nn.utils.get_total_norm([param.grad])
+                # Remove _orig_mod. prefix if present
+                clean_name = name.replace('_orig_mod.', '')
+                
+                # Track for current sample min/max
+                if param_norm > max_norm:
+                    max_norm = param_norm
+                    max_norm_param_name = clean_name
+                if param_norm < min_norm:
+                    min_norm = param_norm
+                    min_norm_param_name = clean_name
+                
+                # Accumulate statistics for comprehensive analysis
+                if clean_name not in param_norm_stats:
+                    param_norm_stats[clean_name] = {
+                        'values': [],
+                        'min': float('inf'),
+                        'max': 0.0
+                    }
+                
+                # Update statistics
+                stats = param_norm_stats[clean_name]
+                stats['values'].append(param_norm)
+                stats['min'] = min(stats['min'], param_norm)
+                stats['max'] = max(stats['max'], param_norm)
+        
+        # Clip gradients for this sample
+        if grad_clip != 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        
+        # Update parameters for this sample
+        scaler.step(optimizer)
+        scaler.update()
+        
+    # Get next batch for next iteration
+    X, Y = get_batch('train')
 
     # timing and logging
     t1 = time.time()
@@ -355,11 +364,11 @@ while True:
     t0 = t1
     if iter_num % log_interval == 0:
         # get loss as float. note: this is a CPU-GPU sync point
-        # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        # Calculate average loss across the batch for logging
+        lossf = loss.mean().item()
         
         if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+            mfu = model.estimate_mfu(batch_size, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
