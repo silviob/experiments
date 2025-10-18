@@ -76,68 +76,68 @@ start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 # run generation
-with torch.no_grad():
-    with ctx:
-        for k in range(num_samples):
-            # Iterative refinement using q_probs
-            max_iterations = 5
-            
-            # Generate sequence from current conditioning
+for k in range(num_samples):
+    # Generate initial sequence
+    with torch.no_grad():
+        with ctx:
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-
-            z0 = model.latest_z.clone().detach().requires_grad_(True)  # Make z0 optimizable
+    
+    # Extract z0 and make it optimizable
+    z0 = model.latest_z.clone().detach().requires_grad_(True)
+    
+    # Initialize AdamW optimizer for z0
+    optimizer = torch.optim.AdamW([z0], lr=0.01)
+    
+    # Iterative refinement using gradient-based optimization
+    max_iterations = 5
+    for iteration in range(max_iterations):
+        optimizer.zero_grad()
+        
+        # Run z0 through q-head processing path
+        z_q = torch.zeros_like(z0)
+        for recursion_step in range(model.config.recursion):
+            # Add recursion embedding
+            rec_emb = model.transformer.wre_q(torch.tensor(recursion_step, device=z0.device))
+            rec_emb = rec_emb.unsqueeze(0).unsqueeze(0).expand(z0.size(0), z0.size(1), -1)
+            z_q = z_q + rec_emb
             
-            # Initialize AdamW optimizer for z0
-            optimizer = torch.optim.AdamW([z0], lr=0.01)
-            
-            for iteration in range(max_iterations):
-                optimizer.zero_grad()
-                
-                # Run z0 through q-head processing path
-                z_q = torch.zeros_like(z0)
-                for recursion_step in range(model.config.recursion):
-                    # Add recursion embedding
-                    rec_emb = model.transformer.wre_q(torch.tensor(recursion_step, device=z0.device))
-                    rec_emb = rec_emb.unsqueeze(0).unsqueeze(0).expand(z0.size(0), z0.size(1), -1)
-                    z_q = z_q + rec_emb
-                    
-                    # Process through transformer blocks with non-causal attention
-                    for block in model.transformer.h:
-                        block.attn.causal = False
-                        z_q = block(z_q)
-                    z_q = model.transformer.ln_f(z_q)
-                
-                # Get q_head output
-                q_head_output = model.q_head(z_q)  # (b, t, 1)
-                q_logits = q_head_output.squeeze(-1)  # (b, t)
-                
-                # Target: all 1s (expecting high confidence)
-                target = torch.ones_like(q_logits)
-                
-                # Binary cross entropy loss
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(q_logits, target)
-                
-                # Backpropagate
-                loss.backward()
-                optimizer.step()
-                
-                # Decode and print optimized z0
-                with torch.no_grad():
-                    # Get logits from optimized z0
-                    logits = model.lm_head(z0)
-                    # Sample from logits
-                    probs = torch.softmax(logits, dim=-1)
-                    sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
-                    decoded_text = decode(sampled_indices[0].tolist())
-                    print(f"Iteration {iteration + 1}: {decoded_text}")
-                    print(f"Loss: {loss.item():.4f}")
-            
-            # Final generation from optimized z0
-            with torch.no_grad():
-                logits = model.lm_head(z0)
-                probs = torch.softmax(logits, dim=-1)
-                sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
-                final_text = decode(sampled_indices[0].tolist())
-                
-                print(f"Final optimized result: {final_text}")
-                print('---------------')
+            # Process through transformer blocks with non-causal attention
+            for block in model.transformer.h:
+                block.attn.causal = False
+                z_q = block(z_q)
+            z_q = model.transformer.ln_f(z_q)
+        
+        # Get q_head output
+        q_head_output = model.q_head(z_q)  # (b, t, 1)
+        q_logits = q_head_output.squeeze(-1)  # (b, t)
+        
+        # Target: all 1s (expecting high confidence)
+        target = torch.ones_like(q_logits)
+        
+        # Binary cross entropy loss
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(q_logits, target)
+        
+        # Backpropagate
+        loss.backward()
+        optimizer.step()
+        
+        # Decode and print optimized z0
+        with torch.no_grad():
+            # Get logits from optimized z0
+            logits = model.lm_head(z0)
+            # Sample from logits
+            probs = torch.softmax(logits, dim=-1)
+            sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
+            decoded_text = decode(sampled_indices[0].tolist())
+            print(f"Iteration {iteration + 1}: {decoded_text}")
+            print(f"Loss: {loss.item():.4f}")
+    
+    # Final generation from optimized z0
+    with torch.no_grad():
+        logits = model.lm_head(z0)
+        probs = torch.softmax(logits, dim=-1)
+        sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
+        final_text = decode(sampled_indices[0].tolist())
+        
+        print(f"Final optimized result: {final_text}")
+        print('---------------')
