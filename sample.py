@@ -124,20 +124,28 @@ for k in range(num_samples):
         # Decode and print optimized z0
         with torch.no_grad():
             # Get logits from optimized z0
-            logits = model.lm_head(z0)
-            # Sample from logits
-            probs = torch.softmax(logits, dim=-1)
-            sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
-            decoded_text = decode(sampled_indices[0].tolist())
+            logits = model.lm_head(z0)  # (batch_size, seq_len, vocab_size)
+            # Sample token by token
+            sampled_indices = []
+            for i in range(logits.size(1)):  # For each position in sequence
+                probs = torch.softmax(logits[0, i, :], dim=-1)  # (vocab_size,)
+                sampled_token = torch.multinomial(probs, num_samples=1).item()
+                sampled_indices.append(sampled_token)
+            
+            decoded_text = decode(sampled_indices)
             print(f"Iteration {iteration + 1}: {decoded_text}")
             print(f"Loss: {loss.item():.4f}")
     
     # Final generation from optimized z0
     with torch.no_grad():
-        logits = model.lm_head(z0)
-        probs = torch.softmax(logits, dim=-1)
-        sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
-        final_text = decode(sampled_indices[0].tolist())
+        logits = model.lm_head(z0)  # (batch_size, seq_len, vocab_size)
+        # Sample token by token
+        sampled_indices = []
+        for i in range(logits.size(1)):  # For each position in sequence
+            probs = torch.softmax(logits[0, i, :], dim=-1)  # (vocab_size,)
+            sampled_token = torch.multinomial(probs, num_samples=1).item()
+            sampled_indices.append(sampled_token)
         
+        final_text = decode(sampled_indices)
         print(f"Final optimized result: {final_text}")
         print('---------------')
