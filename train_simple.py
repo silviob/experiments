@@ -29,12 +29,12 @@ always_save_checkpoint = False # we expect to overfit, so only save when val imp
 init_from = 'scratch' # 'scratch' or 'resume'
 # wandb logging
 wandb_log = False # disabled by default
-wandb_project = 'mammals'
-wandb_run_name = 'token embedding replaced'
+wandb_project = 'mammals batch 32'
+wandb_run_name = 'recursive 2 8 512 1 '
 # data
 dataset = 'shakespeare_char'
 gradient_accumulation_steps = 1
-batch_size = 256
+batch_size = 32
 block_size = 256 # context of up to 256 previous characters
 # model - baby GPT model :)
 n_layer = 2

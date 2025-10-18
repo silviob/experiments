@@ -112,7 +112,6 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            wre = nn.Embedding(config.recursion, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
@@ -132,13 +131,12 @@ class GPT(nn.Module):
     def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
-        For non_embedding count (default), the position and recursion embeddings get subtracted.
+        For non_embedding count (default), the position embeddings get subtracted.
         The token embeddings are tied to the lm_head, so they don't add extra parameters.
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
-            n_params -= self.transformer.wre.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -157,29 +155,18 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        def transformer_pass(x, recursion_step):
-            # Add recursion embedding
-            rec_emb = self.transformer.wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
-            rec_emb = rec_emb.unsqueeze(0).unsqueeze(0)  # shape (1, 1, n_embd)
-            rec_emb = rec_emb.expand(b, t, -1)  # shape (b, t, n_embd)
-            
-            # Add recursion embedding to input
-            x = x + rec_emb
-            
-            for block in self.transformer.h:
-                x = block(x)
-            return self.transformer.ln_f(x)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         
-
-        z = torch.zeros_like(x)
-        for recursion_step in range(self.config.recursion):
-            z = transformer_pass(x + z, recursion_step)
-        logits = self.lm_head(z)
+        # Recurrent processing through transformer blocks
+        for _ in range(self.config.recursion):
+            for block in self.transformer.h:
+                x = block(x)
+            x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
