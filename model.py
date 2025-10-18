@@ -353,8 +353,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        # One more forward pass to get q_loss for the final generated sequence
-        idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-        _, _, final_q_loss = self(idx_cond)
-
-        return idx, final_q_loss
+        return idx
