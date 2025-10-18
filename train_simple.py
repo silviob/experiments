@@ -198,14 +198,12 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        q_losses = torch.zeros(eval_iters)
         accuracies = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss, q_loss = model(X, Y)
+                logits, loss = model(X, Y)
             losses[k] = loss.item()
-            q_losses[k] = q_loss.item() if q_loss is not None else 0.0
             
             # Calculate accuracy
             predictions = torch.argmax(logits, dim=-1)
@@ -214,7 +212,6 @@ def estimate_loss():
             
         out[split] = {
             'loss': losses.mean(),
-            'q_loss': q_losses.mean(),
             'accuracy': accuracies.mean()
         }
     model.train()
@@ -245,7 +242,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
 output = open('output.txt', 'w')
-output.write("iteration    loss     q_loss   grad_norm max_norm  max_param                    min_norm  min_param\n")
+output.write("iteration    loss     grad_norm max_norm  max_param                    min_norm  min_param\n")
 output.close()
 
 # Global dictionary to track gradient norms for all parameters
@@ -262,12 +259,10 @@ while True:
         metrics = estimate_loss()
         train_loss = metrics['train']['loss']
         val_loss = metrics['val']['loss']
-        train_q_loss = metrics['train']['q_loss']
-        val_q_loss = metrics['val']['q_loss']
         train_acc = metrics['train']['accuracy']
         val_acc = metrics['val']['accuracy']
         
-        print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, train q_loss {train_q_loss:.4f}, val q_loss {val_q_loss:.4f}, train acc {train_acc:.4f}, val acc {val_acc:.4f}")
+        print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, train acc {train_acc:.4f}, val acc {val_acc:.4f}")
         
         # Display comprehensive gradient norm statistics
         display_gradient_stats()
@@ -277,8 +272,6 @@ while True:
                 "iter": iter_num,
                 "train/loss": train_loss,
                 "val/loss": val_loss,
-                "train/q_loss": train_q_loss,
-                "val/q_loss": val_q_loss,
                 "train/accuracy": train_acc,
                 "val/accuracy": val_acc,
                 "lr": lr,
@@ -303,17 +296,12 @@ while True:
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
-            logits, loss, q_loss = model(X, Y)
+            logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            if q_loss is not None:
-                q_loss = q_loss / gradient_accumulation_steps # scale the q_loss
-                total_loss = loss + q_loss  # combine both losses
-            else:
-                total_loss = loss
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
-        scaler.scale(total_loss).backward()
+        scaler.scale(loss).backward()
     # calculate statistics before gradient clipping
     scaler.unscale_(optimizer)
     
@@ -357,7 +345,7 @@ while True:
     
     # Log statistics to output.txt
     with open('output.txt', 'a') as f:
-        q_loss_val = q_loss.item() * gradient_accumulation_steps if q_loss is not None else 0.0
+        q_loss_val = 0.0
         f.write(f"{iter_num:>8} {loss.item() * gradient_accumulation_steps:>8.3f} {q_loss_val:>8.3f} {total_grad_norm:>8.3f} {max_norm:>8.3f} {max_norm_param_name} {min_norm:>8.3f} {min_norm_param_name}\n")
     
     # clip the gradient
@@ -377,13 +365,11 @@ while True:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
-        total_lossf = total_loss.item() * gradient_accumulation_steps
-        q_lossf = q_loss.item() * gradient_accumulation_steps if q_loss is not None else 0.0
         
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: total_loss {total_lossf:.4f}, loss {lossf:.4f}, q_loss {q_lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 

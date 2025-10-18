@@ -112,18 +112,12 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            wre_y = nn.Embedding(config.recursion, config.n_embd),
-            wre_q = nn.Embedding(config.recursion, config.n_embd),
+            wre = nn.Embedding(config.recursion, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.q_head = nn.Linear(config.n_embd, 1, bias=False)
-        
-        # Store latest z and q_head output for inspection
-        self.latest_z = None
-        self.latest_q_head_output = None
 
         # init all weights
         self.apply(self._init_weights)
@@ -144,8 +138,7 @@ class GPT(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
-            n_params -= self.transformer.wre_y.weight.numel()
-            n_params -= self.transformer.wre_q.weight.numel()
+            n_params -= self.transformer.wre.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -164,9 +157,9 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        def transformer_pass(x, wre, recursion_step, causal):
+        def transformer_pass(x, recursion_step):
             # Add recursion embedding
-            rec_emb = wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
+            rec_emb = self.transformer.wre(torch.tensor(recursion_step, device=device))  # shape (n_embd,)
             rec_emb = rec_emb.unsqueeze(0).unsqueeze(0)  # shape (1, 1, n_embd)
             rec_emb = rec_emb.expand(b, t, -1)  # shape (b, t, n_embd)
             
@@ -174,7 +167,6 @@ class GPT(nn.Module):
             x = x + rec_emb
             
             for block in self.transformer.h:
-                block.attn.causal = causal
                 x = block(x)
             return self.transformer.ln_f(x)
 
@@ -186,39 +178,16 @@ class GPT(nn.Module):
 
         z = torch.zeros_like(x)
         for recursion_step in range(self.config.recursion):
-            z = transformer_pass(x + z, self.transformer.wre_y, recursion_step, True)
+            z = transformer_pass(x + z, recursion_step)
         logits = self.lm_head(z)
-        
-        z0 = z.detach()
-        z_q = torch.zeros_like(x)
-        for recursion_step in range(self.config.recursion):
-            z_q = transformer_pass(z0 + z_q, self.transformer.wre_q, recursion_step, False)                                                                        
-        q_head_output = self.q_head(z_q)  # (b, t, 1)
-        q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
-
-        self.latest_z = z0
-        self.latest_q_head_output = q_head_output
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-            # Get model's predictions using argmax
-            pred_tokens = torch.argmax(logits, dim=-1)  # (b, t)
-            
-            # Create binary mask: 1 if prediction matches target, 0 otherwise
-            correct_mask = (pred_tokens == targets).float()  # (b, t)
-            
-            # Binary cross entropy loss between q_hat and correct_mask
-            q_loss = F.binary_cross_entropy_with_logits(
-                q_hat.view(-1),  # Flatten q_hat to (b*t,)
-                correct_mask.view(-1),  # Flatten correct_mask to (b*t,)
-                reduction='mean'  # Return reduced loss
-            )
         else:
             loss = None
-            q_loss = None
 
-        return logits, loss, q_loss
+        return logits, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -341,7 +310,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _, _ = self(idx_cond)
+            logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
