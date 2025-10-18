@@ -121,7 +121,8 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.q_head = nn.Linear(config.n_embd, 1, bias=False)
         
-        # Store latest q_head output for inspection
+        # Store latest z and q_head output for inspection
+        self.latest_z = None
         self.latest_q_head_output = None
 
         # init all weights
@@ -195,6 +196,7 @@ class GPT(nn.Module):
         q_head_output = self.q_head(z_q)  # (b, t, 1)
         q_hat = q_head_output.squeeze(-1)  # (b, t, 1) -> (b, t)
 
+        self.latest_z = z0
         self.latest_q_head_output = q_head_output
 
         if targets is not None:
@@ -339,7 +341,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _, q_loss = self(idx_cond)
+            logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

@@ -80,78 +80,64 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             # Iterative refinement using q_probs
-            current_x = x.clone()  # Start with original conditioning sequence
             max_iterations = 5
             
-            for iteration in range(max_iterations):
-                # Generate sequence from current conditioning
-                y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
-                
-                # Get the q_head output from the model's latest forward pass
-                q_head_output = model.latest_q_head_output  # (1, t, 1)
-                
-                # q_head outputs logits for binary classification (correctness probability)
-                q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
-                
-                # Convert logits to probabilities [0, 1] using sigmoid
-                q_probs = torch.sigmoid(q_logits)  # (t,)
-                
-                conditioning_length = current_x.size(1)
+            # Generate sequence from current conditioning
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
 
-                # Print intermediate iteration result
-                decoded_text = decode(y[0].tolist())
-                colored_text = ""
-                for i, char in enumerate(decoded_text):
-                    if i < conditioning_length:
-                        colored_text += char
-                        continue
-                    if i < len(q_probs):
-                        if q_probs[i] < 0.5:  # Low probability = likely incorrect
-                            colored_text += f"{Colors.RED}{char}{Colors.RESET}"
-                        else:  # High probability = likely correct
-                            colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
-                    else:
-                        colored_text += char
+            z0 = model.latest_z.clone().detach().requires_grad_(True)  # Make z0 optimizable
+            
+            # Initialize AdamW optimizer for z0
+            optimizer = torch.optim.AdamW([z0], lr=0.01)
+            
+            for iteration in range(max_iterations):
+                optimizer.zero_grad()
                 
-                print(f"Iteration {iteration + 1}: {colored_text}")
-                                
-                # Find first low confidence token in newly generated part only
-                first_low_conf_idx = None
-                for i in range(conditioning_length, len(q_probs)):
-                    if q_probs[i] < 0.5:
-                        first_low_conf_idx = conditioning_length + i
-                        break
+                # Run z0 through q-head processing path
+                z_q = torch.zeros_like(z0)
+                for recursion_step in range(model.config.recursion):
+                    # Add recursion embedding
+                    rec_emb = model.transformer.wre_q(torch.tensor(recursion_step, device=z0.device))
+                    rec_emb = rec_emb.unsqueeze(0).unsqueeze(0).expand(z0.size(0), z0.size(1), -1)
+                    z_q = z_q + rec_emb
+                    
+                    # Process through transformer blocks with non-causal attention
+                    for block in model.transformer.h:
+                        block.attn.causal = False
+                        z_q = block(z_q)
+                    z_q = model.transformer.ln_f(z_q)
                 
-                # If no low confidence tokens found in new part, we're done
-                if first_low_conf_idx is None:
-                    break
+                # Get q_head output
+                q_head_output = model.q_head(z_q)  # (b, t, 1)
+                q_logits = q_head_output.squeeze(-1)  # (b, t)
                 
-                # Truncate at first low confidence token and use as new conditioning
-                if first_low_conf_idx > conditioning_length:
-                    current_x = y[:, :first_low_conf_idx]  # Keep only good tokens
+                # Target: all 1s (expecting high confidence)
+                target = torch.ones_like(q_logits)
+                
+                # Binary cross entropy loss
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(q_logits, target)
+                
+                # Backpropagate
+                loss.backward()
+                optimizer.step()
+                
+                # Decode and print optimized z0
+                with torch.no_grad():
+                    # Get logits from optimized z0
+                    logits = model.lm_head(z0)
+                    # Sample from logits
+                    probs = torch.softmax(logits, dim=-1)
+                    sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
+                    decoded_text = decode(sampled_indices[0].tolist())
+                    print(f"Iteration {iteration + 1}: {decoded_text}")
+                    print(f"Loss: {loss.item():.4f}")
             
-            # Final generation result
-            y = model.generate(current_x, max_new_tokens, temperature=temperature, top_k=top_k)
-            
-            # Get final q_head output for coloring
-            q_head_output = model.latest_q_head_output  # (1, t, 1)
-            q_logits = q_head_output.squeeze(0).squeeze(-1)  # (t,)
-            q_probs = torch.sigmoid(q_logits)  # (t,)
-            
-            # Decode the final generated text
-            decoded_text = decode(y[0].tolist())
-            
-            # Color each character based on its q_head probability
-            # Higher probabilities = more confident the prediction is correct
-            colored_text = ""
-            for i, char in enumerate(decoded_text):
-                if i < len(q_probs):
-                    if q_probs[i] < 0.5:  # Low probability = likely incorrect
-                        colored_text += f"{Colors.RED}{char}{Colors.RESET}"
-                    else:  # High probability = likely correct
-                        colored_text += f"{Colors.GREEN}{char}{Colors.RESET}"
-                else:
-                    colored_text += char
-            
-            print(colored_text)
-            print('---------------')
+            # Final generation from optimized z0
+            with torch.no_grad():
+                logits = model.lm_head(z0)
+                probs = torch.softmax(logits, dim=-1)
+                sampled_indices = torch.multinomial(probs.view(-1), num_samples=1).view(z0.size(0), z0.size(1))
+                final_text = decode(sampled_indices[0].tolist())
+                
+                print(f"Final optimized result: {final_text}")
+                print('---------------')
