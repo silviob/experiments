@@ -202,8 +202,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
-            # loss is now (batch_size, seq_len), so we need to average it
-            losses[k] = loss.mean().item()
+            losses[k] = loss.item()
             
             # Calculate accuracy
             predictions = torch.argmax(logits, dim=-1)
@@ -289,74 +288,65 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-    # forward backward update, processing each sample individually
+    # forward backward update, batch-level processing
     with ctx:
-        logits, loss = model(X, Y)  # loss shape: (batch_size, seq_len)
+        logits, loss = model(X, Y)  # loss is now a scalar
     
-    # Process each sample in the batch individually
-    batch_size = X.size(0)
-    total_grad_norm = 0.0
+    # Get next batch for next iteration
+    X, Y = get_batch('train')
+    
+    # Backward pass for the entire batch
+    scaler.scale(loss).backward()
+    
+    # Calculate gradient statistics before clipping
+    scaler.unscale_(optimizer)
+    
+    # Calculate total gradient norm using get_total_norm (before clipping)
+    total_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters()])
+    
+    # Find parameter with highest and lowest gradient norm
     max_norm = 0.0
     max_norm_param_name = ""
     min_norm = float('inf')
     min_norm_param_name = ""
     
-    for sample_idx in range(batch_size):
-        # Get loss for this sample (sum over sequence length)
-        sample_loss = loss[sample_idx].sum()  # scalar loss for this sample
+    # Collect gradient norms for all parameters
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            param_norm = torch.nn.utils.get_total_norm([param.grad])
+            # Remove _orig_mod. prefix if present
+            clean_name = name.replace('_orig_mod.', '')
+            
+            # Track for current batch min/max
+            if param_norm > max_norm:
+                max_norm = param_norm
+                max_norm_param_name = clean_name
+            if param_norm < min_norm:
+                min_norm = param_norm
+                min_norm_param_name = clean_name
+            
+            # Accumulate statistics for comprehensive analysis
+            if clean_name not in param_norm_stats:
+                param_norm_stats[clean_name] = {
+                    'values': [],
+                    'min': float('inf'),
+                    'max': 0.0
+                }
+            
+            # Update statistics
+            stats = param_norm_stats[clean_name]
+            stats['values'].append(param_norm)
+            stats['min'] = min(stats['min'], param_norm)
+            stats['max'] = max(stats['max'], param_norm)
         
-        # Zero gradients before processing this sample
-        optimizer.zero_grad(set_to_none=True)
-        
-        # Backward pass for this sample
-        scaler.scale(sample_loss).backward()
-        
-        # Calculate gradient statistics for this sample
-        scaler.unscale_(optimizer)
-        
-        # Calculate total gradient norm for this sample
-        sample_grad_norm = torch.nn.utils.get_total_norm([param.grad for param in model.parameters() if param.grad is not None])
-        total_grad_norm += sample_grad_norm
-        
-        # Find parameter with highest and lowest gradient norm for this sample
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                param_norm = torch.nn.utils.get_total_norm([param.grad])
-                # Remove _orig_mod. prefix if present
-                clean_name = name.replace('_orig_mod.', '')
-                
-                # Track for current sample min/max
-                if param_norm > max_norm:
-                    max_norm = param_norm
-                    max_norm_param_name = clean_name
-                if param_norm < min_norm:
-                    min_norm = param_norm
-                    min_norm_param_name = clean_name
-                
-                # Accumulate statistics for comprehensive analysis
-                if clean_name not in param_norm_stats:
-                    param_norm_stats[clean_name] = {
-                        'values': [],
-                        'min': float('inf'),
-                        'max': 0.0
-                    }
-                
-                # Update statistics
-                stats = param_norm_stats[clean_name]
-                stats['values'].append(param_norm)
-                stats['min'] = min(stats['min'], param_norm)
-                stats['max'] = max(stats['max'], param_norm)
-        
-        # Clip gradients for this sample
-        if grad_clip != 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        
-        # Update parameters for this sample
-        scaler.step(optimizer)
-        scaler.update()
-        
-    # Get next batch for next iteration
-    X, Y = get_batch('train')
+    # clip the gradient
+    if grad_clip != 0.0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    # step the optimizer and scaler if training in fp16
+    scaler.step(optimizer)
+    scaler.update()
+    # flush the gradients as soon as we can, no need for this memory anymore
+    optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
     t1 = time.time()
@@ -364,8 +354,8 @@ while True:
     t0 = t1
     if iter_num % log_interval == 0:
         # get loss as float. note: this is a CPU-GPU sync point
-        # Calculate average loss across the batch for logging
-        lossf = loss.mean().item()
+        # Get loss as float for logging
+        lossf = loss.item()
         
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = model.estimate_mfu(batch_size, dt)
