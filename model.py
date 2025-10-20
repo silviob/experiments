@@ -117,8 +117,6 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.a1 = nn.Parameter(torch.tensor(1.0))
-        self.a2 = nn.Parameter(torch.tensor(0.0))
 
         # init all weights
         self.apply(self._init_weights)
@@ -164,17 +162,11 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         z = torch.zeros_like(x)
         # Recurrent processing through transformer blocks
-        for _ in range(self.config.recursion - 2):
+        for _ in range(self.config.recursion):
             for block in self.transformer.h:
                 z = block(z + x)
             z = self.transformer.ln_f(z)
-        z_int = z
-        z = torch.zeros_like(z)
-        for _ in range(2):
-            for block in self.transformer.h:
-                z = block(z + z_int)
-            z = self.transformer.ln_f(z)
-        logits = self.lm_head(self.a1 * z + self.a2 * z_int)
+        logits = self.lm_head(z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
