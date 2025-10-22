@@ -201,7 +201,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, z, loss = model(X, Y)
             losses[k] = loss.item()
             
             # Calculate accuracy
@@ -237,6 +237,7 @@ if wandb_log:
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
+z0 = None  # Initialize z0 for iterative refinement
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
@@ -290,10 +291,14 @@ while True:
 
     # forward backward update, batch-level processing
     with ctx:
-        logits, loss = model(X, Y)  # loss is now a scalar
+        logits, z, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
-    # Get next batch for next iteration
-    X, Y = get_batch('train')
+    # Get new batch only 10% of the time, otherwise reuse current batch
+    if torch.rand(1).item() < 0.1:  # 10% chance to get new batch
+        X, Y = get_batch('train')
+        z0 = None  # Reset z0 when getting new batch
+    else:
+        z0 = z.detach().clone()  # Use current z as z0 for next iteration
     
     # Backward pass for the entire batch
     scaler.scale(loss).backward()

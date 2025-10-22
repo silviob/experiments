@@ -149,7 +149,7 @@ class GPT(nn.Module):
 
 
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, z0=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -160,7 +160,10 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        z = torch.zeros_like(x)
+        if z0 is not None:
+            z = z0
+        else:
+            z = torch.zeros_like(x)
         # Recurrent processing through transformer blocks
         for _ in range(self.config.recursion):
             for block in self.transformer.h:
@@ -174,7 +177,7 @@ class GPT(nn.Module):
         else:
             loss = None
 
-        return logits, loss
+        return logits, z.detach().clone(), loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -297,7 +300,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, z, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
