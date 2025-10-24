@@ -294,15 +294,7 @@ while True:
         logits, z, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
     # Get new batch only 10% of the time, otherwise reuse current batch
-    mask = torch.rand(X.shape[0]) < 0.1  # shape (batch_size)
-    xnew, ynew = get_batch('train')
-    X[mask] = xnew[mask]
-    Y[mask] = ynew[mask]
-    
-    # Update z0: fresh examples get 0, continuing examples get previous z
-    if z0 is None:
-        z0 = torch.zeros_like(X)
-    z0 = torch.where(mask, torch.zeros_like(X), z)
+    X, Y = get_batch('train')
     
     # Backward pass for the entire batch
     scaler.scale(loss).backward()

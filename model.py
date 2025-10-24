@@ -116,7 +116,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd // 2, config.vocab_size, bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -169,7 +169,7 @@ class GPT(nn.Module):
             for block in self.transformer.h:
                 z = block(z + x)
             z = self.transformer.ln_f(z)
-        logits = self.lm_head(z)
+        logits = self.lm_head(z[:, :self.config.n_embd // 2])
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
