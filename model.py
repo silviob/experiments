@@ -15,6 +15,72 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+class OrthoGrad(torch.optim.Optimizer):
+    def __init__(self, params, base_optimizer_cls=torch.optim.SGD):
+        """
+        A wrapper optimizer that projects gradients to be orthogonal
+        to the current parameters before performing an update.
+
+        Args:
+            params (iterable): Parameter groups to optimize
+            base_optimizer_cls (Optimizer class): The base optimizer class
+                (e.g., torch.optim.SGD, torch.optim.AdamW).
+        """
+        # Minimal defaults for OrthoGrad itself (nothing special needed).
+        defaults = {}
+        super().__init__(params, defaults)
+        # Create the wrapped/base optimizer using *our* param_groups.
+        self.base_optimizer = base_optimizer_cls(self.param_groups)
+
+    @staticmethod
+    def _orthogonalize_gradients(params):
+        """
+        Projects the gradient g to be orthogonal to the current weights w.
+
+        g_orth = g - ( (w·g)/(w·w + eps) ) * w
+
+        And then re-scales g_orth to have the same norm as g.
+        """
+        with torch.no_grad():
+            for p in params:
+                if p.grad is not None:
+                    w = p.view(-1)
+                    g = p.grad.view(-1)
+
+                    w_norm_sq = torch.dot(w, w) + 1e-30
+                    proj = torch.dot(w, g) / w_norm_sq
+                    g_orth = g - proj * w
+
+                    g_norm = g.norm(2)
+                    g_orth_norm = g_orth.norm(2) + 1e-30
+                    g_orth_scaled = g_orth * (g_norm / g_orth_norm)
+
+                    p.grad.copy_(g_orth_scaled.view_as(p.grad))
+
+    def step(self, closure=None):
+        for group in self.param_groups:
+            self._orthogonalize_gradients(group['params'])
+
+        return self.base_optimizer.step(closure)
+
+def s(x, epsilon=1e-30):
+    return torch.where(
+        x<0,
+        1/(1-x+ epsilon),
+        x + 1
+    )
+
+def log_stablemax(x, dim=-1):
+    s_x = s(x)
+    return torch.log(s_x/torch.sum(s_x, dim=dim, keepdim=True))
+
+def stablemax_cross_entropy(logits, labels, reduction="mean", dtype=torch.float32):
+    logprobs = log_stablemax(logits.to(dtype), dim=-1)
+    prediction_logprobs = torch.gather(logprobs, index=labels[:, None], dim=-1)
+
+    loss = -torch.mean(prediction_logprobs) if reduction=="mean" else - prediction_logprobs
+    return loss
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -116,7 +182,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd // 2, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -169,11 +235,11 @@ class GPT(nn.Module):
             for block in self.transformer.h:
                 z = block(z + x)
             z = self.transformer.ln_f(z)
-        logits = self.lm_head(z[:, :self.config.n_embd // 2])
+        logits = self.lm_head(z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = stablemax_cross_entropy(logits, targets)
         else:
             loss = None
 
@@ -256,20 +322,20 @@ class GPT(nn.Module):
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        print(f"using fused AdamW: {use_fused}")
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
+            {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate, 'betas': betas, **extra_args},
+            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate, 'betas': betas, **extra_args}
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        optimizer = OrthoGrad(optim_groups, base_optimizer_cls=torch.optim.AdamW)
 
         return optimizer
 
