@@ -48,10 +48,10 @@ max_iters = 50000
 weight_decay = 1e-10
 beta1 = 0.9
 beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 100 # not super necessary potentially
+warmup_iters = 2500 # not super necessary potentially
 lr_decay_iters = max_iters # make equal to max_iters usually
 min_lr = 1e-4 # learning_rate / 10 usually
 # system
@@ -293,9 +293,8 @@ while True:
     with ctx:
         logits, z0, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
-    if iter_num % 16 == 0:
-        X, Y = get_batch('train')
-        z0 = None
+    X, Y = get_batch('train')
+    z0 = None
 
     # Backward pass for the entire batch
     scaler.scale(loss).backward()
