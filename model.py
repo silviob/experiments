@@ -57,12 +57,6 @@ class OrthoGrad(torch.optim.Optimizer):
 
                     p.grad.copy_(g_orth_scaled.view_as(p.grad))
 
-    def step(self, closure=None):
-        for group in self.param_groups:
-            self._orthogonalize_gradients(group['params'])
-
-        return self.base_optimizer.step(closure)
-
 def s(x, epsilon=1e-30):
     return torch.where(
         x<0,
@@ -74,15 +68,33 @@ def log_stablemax(x, dim=-1):
     s_x = s(x)
     return torch.log(s_x/torch.sum(s_x, dim=dim, keepdim=True))
 
-def stablemax_cross_entropy(logits, labels, ignore_index: int = -1, valid_mask=None):
-    logprobs = log_stablemax(logits.to(torch.float64), dim=-1)
-
-    if valid_mask is None:
-        valid_mask = (labels != ignore_index)
-    transformed_labels = torch.where(valid_mask, labels, 0)
-    prediction_logprobs = torch.gather(logprobs, index=transformed_labels.to(torch.long).unsqueeze(-1), dim=-1).squeeze(-1)
-
-    return -torch.where(valid_mask, prediction_logprobs, 0)
+def stablemax_cross_entropy(logits, labels, reduction="mean", dtype=torch.float32, ignore_index=-1):
+    # Create valid mask for ignoring certain labels
+    valid_mask = (labels != ignore_index)
+    
+    # Compute log probabilities for all logits
+    logprobs = log_stablemax(logits.to(dtype), dim=-1)
+    
+    # Replace -1 with 0 for gather (gather needs valid indices)
+    # The mask will zero out these values later
+    labels_safe = torch.where(labels == ignore_index, torch.zeros_like(labels), labels)
+    
+    # Gather the log probabilities for the correct labels
+    prediction_logprobs = torch.gather(logprobs, index=labels_safe[:, None], dim=-1).squeeze(1)
+    
+    # Apply valid_mask to mask out ignored labels
+    prediction_logprobs = torch.where(valid_mask, prediction_logprobs, torch.zeros_like(prediction_logprobs))
+    
+    if reduction == "mean":
+        # Compute mean only over valid predictions
+        if valid_mask.any():
+            loss = -torch.sum(prediction_logprobs) / valid_mask.sum()
+        else:
+            loss = torch.tensor(0.0, device=logits.device)
+    else:
+        loss = -prediction_logprobs
+    
+    return loss
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -231,26 +243,23 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         if z0 is None:
             z0 = torch.zeros_like(x)
-        z = torch.zeros_like(x)
+        z = z0
         # Recurrent processing through transformer blocks
-        for _ in range(self.config.recursion - 1):
-            z = x + z0 + z
+        for _ in range(self.config.recursion):
+            z = x + z
             for block in self.transformer.h:
                 z = block(z)
             z = self.transformer.ln_f(z)
-        for block in self.transformer.h:
-            z = block(z)
-        z = self.transformer.ln_f(z)
-        
+
         logits = self.lm_head(z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = stablemax_cross_entropy(logits, targets, ignore_index=-1)
         else:
             loss = None
 
-        return logits, z.detach().clone(), loss
+        return logits, z0.detach().clone(), loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
