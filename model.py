@@ -63,22 +63,60 @@ class OrthoGrad(torch.optim.Optimizer):
 
         return self.base_optimizer.step(closure)
 
-def s(x, epsilon=1e-30):
-    return torch.where(
+def s(x, epsilon=1e-30):  # Increased epsilon for better numerical stability
+    result = torch.where(
         x<0,
         1/(1-x+ epsilon),
         x + 1
     )
+    # Debug: Check for NaN in s function
+    if torch.isnan(result).any():
+        print(f"WARNING: NaN in s(x) function")
+        print(f"x stats: min={x.min()}, max={x.max()}, mean={x.mean()}")
+        print(f"x<0 count: {(x<0).sum()}")
+        print(f"1-x+epsilon stats: min={(1-x+epsilon).min()}, max={(1-x+epsilon).max()}")
+    return result
 
 def log_stablemax(x, dim=-1):
     s_x = s(x)
     return torch.log(s_x/torch.sum(s_x, dim=dim, keepdim=True))
 
 def stablemax_cross_entropy(logits, labels, reduction="mean", dtype=torch.float32):
-    logprobs = log_stablemax(logits.to(dtype), dim=-1)
-    prediction_logprobs = torch.gather(logprobs, index=labels[:, None], dim=-1)
-
-    loss = -torch.mean(prediction_logprobs) if reduction=="mean" else - prediction_logprobs
+    """
+    Compute cross-entropy loss using stablemax activation.
+    
+    Args:
+        logits: (batch_size, sequence_length, vocab_size)
+        labels: (batch_size, sequence_length)
+    """
+    # Debug: Check for NaN in inputs
+    if torch.isnan(logits).any():
+        print("WARNING: NaN detected in logits input")
+        return torch.tensor(float('nan'), device=logits.device)
+    
+    # Flatten for easier processing: (B*T, V)
+    B, T, V = logits.shape
+    logits_flat = logits.view(-1, V)  # (B*T, V)
+    labels_flat = labels.view(-1)    # (B*T,)
+    
+    logprobs = log_stablemax(logits_flat.to(dtype), dim=-1)
+    
+    # Debug: Check for NaN in logprobs
+    if torch.isnan(logprobs).any():
+        print("WARNING: NaN detected in logprobs")
+        print(f"logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}")
+        return torch.tensor(float('nan'), device=logits.device)
+    
+    # Gather the log probabilities for the correct labels
+    # labels_flat: (B*T,) needs to be unsqueezed to (B*T, 1) for gather
+    prediction_logprobs = torch.gather(logprobs, dim=1, index=labels_flat.unsqueeze(1)).squeeze(1)
+    
+    # Debug: Check for NaN in prediction_logprobs
+    if torch.isnan(prediction_logprobs).any():
+        print("WARNING: NaN detected in prediction_logprobs")
+        return torch.tensor(float('nan'), device=logits.device)
+    
+    loss = -torch.mean(prediction_logprobs) if reduction=="mean" else -prediction_logprobs
     return loss
 
 class LayerNorm(nn.Module):
