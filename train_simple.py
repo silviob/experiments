@@ -291,11 +291,12 @@ while True:
 
     # forward backward update, batch-level processing
     with ctx:
-        logits, z, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
+        logits, z0, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
-    # Get new batch only 10% of the time, otherwise reuse current batch
-    X, Y = get_batch('train')
-    
+    if iter_num % 16 == 0:
+        X, Y = get_batch('train')
+        z0 = None
+
     # Backward pass for the entire batch
     scaler.scale(loss).backward()
     

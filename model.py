@@ -229,20 +229,24 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        if z0 is not None:
-            z = z0
-        else:
-            z = torch.zeros_like(x)
+        if z0 is None:
+            z0 = torch.zeros_like(x)
+        z = torch.zeros_like(x)
         # Recurrent processing through transformer blocks
-        for _ in range(self.config.recursion):
+        for _ in range(self.config.recursion - 1):
+            z = x + z0 + z
             for block in self.transformer.h:
-                z = block(z + x)
+                z = block(z)
             z = self.transformer.ln_f(z)
+        for block in self.transformer.h:
+            z = block(z)
+        z = self.transformer.ln_f(z)
+        
         logits = self.lm_head(z)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            loss = stablemax_cross_entropy(logits, targets, ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             loss = None
 
@@ -338,7 +342,7 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        optimizer = OrthoGrad(optim_groups, base_optimizer_cls=torch.optim.AdamW)
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
 
         return optimizer
 
