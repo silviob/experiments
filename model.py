@@ -68,33 +68,12 @@ def log_stablemax(x, dim=-1):
     s_x = s(x)
     return torch.log(s_x/torch.sum(s_x, dim=dim, keepdim=True))
 
-def stablemax_cross_entropy(logits, labels, reduction="mean", dtype=torch.float32, ignore_index=-1):
-    # Create valid mask for ignoring certain labels
-    valid_mask = (labels != ignore_index)
-    
+def stablemax_cross_entropy(logits, labels, reduction="mean", dtype=torch.float64, ignore_index=-1):
     # Compute log probabilities for all logits
     logprobs = log_stablemax(logits.to(dtype), dim=-1)
-    
-    # Replace -1 with 0 for gather (gather needs valid indices)
-    # The mask will zero out these values later
-    labels_safe = torch.where(labels == ignore_index, torch.zeros_like(labels), labels)
-    
-    # Gather the log probabilities for the correct labels
-    prediction_logprobs = torch.gather(logprobs, index=labels_safe[:, None], dim=-1).squeeze(1)
-    
-    # Apply valid_mask to mask out ignored labels
-    prediction_logprobs = torch.where(valid_mask, prediction_logprobs, torch.zeros_like(prediction_logprobs))
-    
-    if reduction == "mean":
-        # Compute mean only over valid predictions
-        if valid_mask.any():
-            loss = -torch.sum(prediction_logprobs) / valid_mask.sum()
-        else:
-            loss = torch.tensor(0.0, device=logits.device)
-    else:
-        loss = -prediction_logprobs
-    
-    return loss
+    return torch.nn.functional.nll_loss(logprobs.view(-1, logprobs.size(-1)),
+                                        labels.view(-1), reduction=reduction,
+                                        ignore_index=ignore_index)
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
