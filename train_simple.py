@@ -237,7 +237,6 @@ if wandb_log:
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
-z0 = None  # Initialize z0 for iterative refinement
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 running_mfu = -1.0
@@ -291,10 +290,11 @@ while True:
 
     # forward backward update, batch-level processing
     with ctx:
-        logits, z0, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
+        z0 = None
+        for _ in range(16):
+            logits, z0, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
     X, Y = get_batch('train')
-    z0 = None
 
     # Backward pass for the entire batch
     scaler.scale(loss).backward()

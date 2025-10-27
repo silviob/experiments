@@ -225,6 +225,7 @@ class GPT(nn.Module):
         z = z0
         # Recurrent processing through transformer blocks
         for _ in range(self.config.recursion):
+            z0 = z
             z = x + z
             for block in self.transformer.h:
                 z = block(z)
@@ -368,8 +369,10 @@ class GPT(nn.Module):
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
+            # apply stablemax to convert logits to (normalized) probabilities
+            # This uses the same stablemax transformation as during training
+            log_probs = log_stablemax(logits, dim=-1)
+            probs = torch.exp(log_probs)  # Convert log probabilities to regular probabilities
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
