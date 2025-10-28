@@ -20,7 +20,7 @@ start = "\n" # starting prompt
 num_samples = 10 # number of samples to draw
 max_new_tokens = 200 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random
-top_k = 200 # retain only the top_k most likely tokens
+top_k = 5 # retain only the top_k most likely tokens
 seed = 1337
 device = 'cuda' # single GPU only
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'

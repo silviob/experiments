@@ -289,10 +289,12 @@ while True:
         break
 
     # forward backward update, batch-level processing
-    with ctx:
+    with torch.no_grad():
         z0 = None
-        for _ in range(16):
-            logits, z0, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
+        for _ in range(torch.randint(0, 4, (1,)).item()):
+            _, z0, _ = model(X, Y, z0=z0)
+    with ctx:
+        logits, _, loss = model(X, Y, z0=z0)  # Use z0 for iterative refinement
     
     X, Y = get_batch('train')
 
